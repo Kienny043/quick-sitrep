@@ -1,0 +1,60 @@
+{% extends "quickentry/base.html" %}
+{% load static %}
+{% block title %}Settings — Quick SitRep{% endblock %}
+{% block body %}
+<div id="app">
+  <header class="topbar">
+    <div class="topbar-title">
+      <img src="{% static 'quickentry/img/logo.png' %}" alt="PDRRMO Logo" class="topbar-logo">
+      <h1>Quick SitRep</h1>
+      <span class="batch-status">Settings</span>
+    </div>
+    <div class="topbar-user">
+      <span>{{ user.username }}</span>
+      <a href="{% url 'quickentry-main' %}" class="link-button">Back to Dashboard</a>
+      <a href="{% url 'quickentry-history' %}" class="link-button">History</a>
+      <form method="post" action="{% url 'logout' %}" class="logout-form">
+        {% csrf_token %}
+        <button type="submit" class="link-button">Log out</button>
+      </form>
+    </div>
+  </header>
+
+  <main class="settings-page">
+    <section class="settings-card">
+      <h2>SitRep Signatories</h2>
+      <p class="settings-hint">
+        These names and titles appear in the signature block of every generated SitRep PDF
+        (Section VI footer). Changes apply to the next PDF you generate — already-finalized
+        batches keep whatever was current when they were compiled.
+      </p>
+
+      {% if saved %}
+        <div class="alert alert-success">Saved.</div>
+      {% endif %}
+
+      <form method="post">
+        {% csrf_token %}
+        <label class="settings-field">Prepared by
+          <input type="text" name="prepared_by" value="{{ config.prepared_by }}" required>
+        </label>
+        <label class="settings-field">Noted by
+          <input type="text" name="noted_by" value="{{ config.noted_by }}" required>
+        </label>
+        <label class="settings-field">Noted by — Title
+          <input type="text" name="noted_by_title" value="{{ config.noted_by_title }}" required>
+        </label>
+        <label class="settings-field">Approved by
+          <input type="text" name="approved_by" value="{{ config.approved_by }}" required>
+        </label>
+        <label class="settings-field">Approved by — Title
+          <input type="text" name="approved_by_title" value="{{ config.approved_by_title }}" required>
+        </label>
+        <div class="actions">
+          <button type="submit" class="btn btn-primary">Save</button>
+        </div>
+      </form>
+    </section>
+  </main>
+</div>
+{% endblock %}

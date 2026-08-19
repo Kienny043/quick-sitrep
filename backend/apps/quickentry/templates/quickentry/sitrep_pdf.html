@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Situational Report</title>
+<style>
+  @page { size: A4; margin: 18mm 15mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Times New Roman", Times, serif; font-size: 11.5px; color: #000; }
+
+  .header { text-align: center; border-bottom: 2px solid #000; padding-bottom: 10px; margin-bottom: 16px; }
+  .seal-wrapper { text-align: center; margin-bottom: 6px; }
+  .seal { width: 64px; height: auto; }
+  .republic { font-size: 11px; font-weight: 600; letter-spacing: 1px; margin: 0; }
+  .province { font-size: 13px; font-weight: 700; letter-spacing: 1px; margin: 0; }
+  .office { font-size: 14px; font-weight: 700; letter-spacing: 1px; margin: 4px 0 0; }
+  .division { font-size: 12px; font-weight: 700; letter-spacing: 1px; margin: 0; }
+  .tool-tag { font-size: 9px; color: #666; margin-top: 4px; }
+
+  .info-bar { margin-bottom: 14px; }
+  .row { margin-bottom: 2px; }
+  .label { font-weight: 700; display: inline-block; width: 70px; text-transform: uppercase; }
+  .subject { font-weight: 700; color: #b91c1c; }
+
+  .section-title {
+    font-weight: 700; font-size: 12.5px; text-transform: uppercase;
+    margin: 16px 0 6px; padding-bottom: 2px; border-bottom: 1px solid #000;
+  }
+  .doc-row { margin: 0 0 6px; line-height: 1.5; }
+
+  .muni-block { margin-bottom: 12px; page-break-inside: avoid; }
+  .muni-name { font-weight: 700; font-size: 12.5px; margin: 0 0 4px; text-transform: uppercase; }
+  .incident { margin-bottom: 8px; padding-left: 12px; border-left: 3px solid; }
+  .incident.road { border-color: #f4a300; }
+  .incident.medical { border-color: #dc2626; }
+  .incident.fire { border-color: #ea580c; }
+  .incident.water { border-color: #0369a1; }
+  .incident.trauma { border-color: #7c3aed; }
+  .incident p { margin: 0; font-size: 11px; line-height: 1.55; }
+  .incident .what { font-weight: 700; }
+  .victims-list { margin: 3px 0 0 14px; padding: 0; font-size: 10.5px; }
+  .victims-list li { margin-bottom: 2px; }
+  .no-incidents { font-size: 11px; color: #555; font-style: italic; }
+
+  table.summary-table { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
+  table.summary-table td, table.summary-table th {
+    border: 1px solid #999; padding: 4px 8px; font-size: 11px; text-align: left;
+  }
+  table.summary-table th { background: #eef1fb; font-weight: 700; }
+  table.summary-table td.num { text-align: right; width: 60px; }
+  .rollup-total td { font-weight: 700; background: #fafafa; }
+
+  .lifelines-row { margin-bottom: 6px; font-size: 11px; }
+  .lifelines-notes { margin: 2px 0 0 14px; font-size: 10px; color: #444; }
+
+  .footer { border-top: 1px solid #000; padding-top: 10px; margin-top: 20px; }
+  .signature p { margin: 2px 0; }
+  .signature .name { font-weight: 700; margin-top: 10px; }
+  .generated { text-align: right; margin-top: 18px; font-size: 9.5px; color: #555; }
+
+  /* Section VI + signatories move together as one unit — otherwise the
+     signature block can land alone on a final page when VI doesn't fill
+     the previous one. break-inside is the current CSS Fragmentation
+     property WeasyPrint supports; page-break-inside is the older alias,
+     kept alongside it the same way .muni-block already does above. */
+  .closing-block { break-inside: avoid; page-break-inside: avoid; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="seal-wrapper">
+    <img class="seal" src="data:image/png;base64,{{ seal_base64 }}" alt="Quezon Province Seal">
+  </div>
+  <p class="republic">Republic of the Philippines</p>
+  <p class="province">Province of Quezon</p>
+  <p class="office">PROVINCIAL DISASTER RISK REDUCTION AND MANAGEMENT OFFICE</p>
+  <p class="division">OPERATIONS AND WARNING DIVISION</p>
+  <p class="tool-tag">Compiled via Quick SitRep (bridge tool)</p>
+</div>
+
+<div class="info-bar">
+  <div class="row"><span class="label">FOR</span><span>THE CHAIRPERSON, PDRRMC</span></div>
+  <div class="row"><span class="label">FROM</span><span>PDRRM EOC, QUEZON PROVINCE</span></div>
+  <div class="row"><span class="label">DATE</span><span>{{ batch.date }}</span></div>
+  <div class="row">
+    <span class="label">SUBJECT</span>
+    <span class="subject">SITUATIONAL REPORT AS OF {{ shift_label }}, {{ batch.date }}</span>
+  </div>
+</div>
+
+<!-- ═══ SECTION I — SITUATION OVERVIEW ═══ -->
+<div class="section-title">I. Situation Overview</div>
+<p class="doc-row"><strong>SYNOPSIS:</strong> {{ synopsis|default:"(not provided)" }}</p>
+<p class="doc-row"><strong>WEATHER CONDITIONS:</strong> {{ weather_conditions|default:"(not provided)" }}</p>
+
+<!-- ═══ SECTION II — INCIDENTS MONITORED ═══ -->
+<div class="section-title">II. Incidents Monitored</div>
+{% if municipality_sections %}
+  {% for muni in municipality_sections %}
+    <div class="muni-block">
+      <p class="muni-name">{{ muni.municipality_name }}</p>
+
+      {% for rc in muni.road_crashes %}
+        <div class="incident road">
+          <p><span class="what">WHAT:</span> Road Crash</p>
+          <p><strong>WHEN:</strong> {{ rc.datetime|date:"d F Y, H:i" }}</p>
+          <p><strong>WHERE:</strong> {{ rc.location }}{% if rc.barangay and rc.barangay not in rc.location %}, Brgy. {{ rc.barangay }}{% endif %}</p>
+          <p><strong>CAUSE:</strong> {{ rc.cause }}</p>
+          <p><strong>VEHICLES INVOLVED:</strong> {{ rc.vehicles_involved }}</p>
+          {% if rc.victims.all %}
+            <p><strong>VICTIMS:</strong></p>
+            <ul class="victims-list">
+              {% for v in rc.victims.all %}
+                <li>{{ v.sex|default:"Unknown" }}, {{ v.age|default:"age unk." }}{% if v.address %}, {{ v.address }}{% endif %} -
+                  {{ v.injuries }} ({{ v.get_injury_classification_display }})</li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+          <p><strong>ACTIONS TAKEN:</strong> {{ rc.actions_taken }}</p>
+          <p><strong>RESPONDING TEAM:</strong> {{ rc.responding_team }}{% if rc.driver %} | Driver: {{ rc.driver }}{% endif %}{% if rc.ert_members %} | ERT: {{ rc.ert_members }}{% endif %}</p>
+        </div>
+      {% endfor %}
+
+      {% for mc in muni.medical_assistance %}
+        <div class="incident medical">
+          <p><span class="what">WHAT:</span> Medical Assistance</p>
+          <p><strong>WHEN:</strong> {{ mc.datetime|date:"d F Y, H:i" }}</p>
+          <p><strong>WHERE:</strong> {{ mc.location }}{% if mc.barangay and mc.barangay not in mc.location %}, Brgy. {{ mc.barangay }}{% endif %}</p>
+          <p><strong>PATIENT:</strong> {{ mc.patient_age|default:"?" }} y/o {{ mc.patient_sex|default:"" }}{% if mc.patient_address %}, {{ mc.patient_address }}{% endif %}</p>
+          <p><strong>NATURE OF ILLNESS:</strong> {{ mc.nature_of_illness }}</p>
+          {% if mc.chief_complaint %}<p><strong>CHIEF COMPLAINT:</strong> {{ mc.chief_complaint }}</p>{% endif %}
+          {% if mc.blood_pressure or mc.pulse_rate or mc.spo2 or mc.temperature %}
+            <p><strong>VITALS:</strong> BP {{ mc.blood_pressure|default:"n/a" }} | PR {{ mc.pulse_rate|default:"n/a" }} | SpO2 {{ mc.spo2|default:"n/a" }} | Temp {{ mc.temperature|default:"n/a" }}</p>
+          {% endif %}
+          <p><strong>ACTIONS TAKEN:</strong> {{ mc.actions_taken }}</p>
+          <p><strong>RESPONDING TEAM:</strong> {{ mc.responding_team }}{% if mc.driver %} | Driver: {{ mc.driver }}{% endif %}{% if mc.ert_members %} | ERT: {{ mc.ert_members }}{% endif %}</p>
+        </div>
+      {% endfor %}
+
+      {% for fi in muni.fire_incidents %}
+        <div class="incident fire">
+          <p><span class="what">WHAT:</span> Fire Incident</p>
+          <p><strong>WHEN:</strong> {{ fi.datetime|date:"d F Y, H:i" }}</p>
+          <p><strong>WHERE:</strong> {{ fi.location }}{% if fi.barangay and fi.barangay not in fi.location %}, Brgy. {{ fi.barangay }}{% endif %}</p>
+          <p><strong>IPO/DTR/TED/TAS:</strong> {{ fi.ipo|time:"H:i" }} / {{ fi.dtr|time:"H:i" }} / {{ fi.ted|time:"H:i" }} / {{ fi.tas|time:"H:i" }}
+            (Response time: {{ fi.response_time_minutes }} min, Distance: {{ fi.distance_km }} km)</p>
+          <p><strong>STRUCTURE TYPE:</strong> {{ fi.structure_type }}</p>
+          <p><strong>FAMILIES / INDIVIDUALS AFFECTED:</strong> {{ fi.families_affected }} / {{ fi.individuals_affected }}
+            &nbsp;|&nbsp; <strong>STRUCTURES BURNED:</strong> {{ fi.structures_burned }}
+            &nbsp;|&nbsp; <strong>FIRE AREA:</strong> {{ fi.fire_area_sqm }} sqm</p>
+          <p><strong>CASUALTIES / INJURED / FATALITIES:</strong> {{ fi.casualties }} / {{ fi.injured }} / {{ fi.fatalities }}</p>
+          <p><strong>ACTIONS TAKEN:</strong> {{ fi.actions_taken }}</p>
+          <p><strong>RESPONDING TEAM:</strong> {{ fi.responding_team }}</p>
+        </div>
+      {% endfor %}
+
+      {% for wi in muni.water_incidents %}
+        <div class="incident water">
+          <p><span class="what">WHAT:</span> {{ wi.incident_type }}</p>
+          <p><strong>WHEN:</strong> {{ wi.datetime|date:"d F Y, H:i" }}</p>
+          <p><strong>WHERE:</strong> {{ wi.location }}{% if wi.barangay and wi.barangay not in wi.location %}, Brgy. {{ wi.barangay }}{% endif %}</p>
+          {% if wi.description %}<p><strong>DESCRIPTION:</strong> {{ wi.description }}</p>{% endif %}
+          <p><strong>FAMILIES / INDIVIDUALS AFFECTED:</strong> {{ wi.families_affected }} / {{ wi.individuals_affected }}</p>
+          <p><strong>CASUALTIES / INJURED / FATALITIES:</strong> {{ wi.casualties }} / {{ wi.injured }} / {{ wi.fatalities }}</p>
+          <p><strong>ACTIONS TAKEN:</strong> {{ wi.actions_taken }}</p>
+          <p><strong>RESPONDING TEAM:</strong> {{ wi.responding_team }}</p>
+        </div>
+      {% endfor %}
+
+      {% for te in muni.trauma_emergencies %}
+        <div class="incident trauma">
+          <p><span class="what">WHAT:</span> {{ te.call_type }}</p>
+          <p><strong>WHEN:</strong> {{ te.datetime|date:"d F Y, H:i" }}</p>
+          <p><strong>WHERE:</strong> {{ te.location }}{% if te.barangay and te.barangay not in te.location %}, Brgy. {{ te.barangay }}{% endif %}</p>
+          <p><strong>PATIENT:</strong> {{ te.patient_age|default:"?" }} y/o {{ te.patient_sex|default:"" }}{% if te.patient_address %}, {{ te.patient_address }}{% endif %}</p>
+          {% if te.chief_complaint %}<p><strong>CHIEF COMPLAINT:</strong> {{ te.chief_complaint }}</p>{% endif %}
+          <p><strong>ACTIONS TAKEN:</strong> {{ te.actions_taken }}</p>
+          <p><strong>RESPONDING TEAM:</strong> {{ te.responding_team }}{% if te.driver %} | Driver: {{ te.driver }}{% endif %}{% if te.ert_members %} | ERT: {{ te.ert_members }}{% endif %}</p>
+        </div>
+      {% endfor %}
+    </div>
+  {% endfor %}
+{% else %}
+  <p class="no-incidents">No incidents reported by any municipality for this period.</p>
+{% endif %}
+
+<!-- ═══ SECTION III — SUMMARY ═══ -->
+<div class="section-title">III. Summary</div>
+<table class="summary-table">
+  <tr><th>Incident Type</th><th class="num">Count</th></tr>
+  <tr><td>Road Crashes</td><td class="num">{{ summary.road_crash_total }}</td></tr>
+  <tr><td>Medical Assistance</td><td class="num">{{ summary.medical_total }}</td></tr>
+  <tr><td>Fire Incidents</td><td class="num">{{ summary.fire_total }}</td></tr>
+  <tr><td>Water Incidents</td><td class="num">{{ summary.water_total }}</td></tr>
+  <tr><td>Trauma Emergencies</td><td class="num">{{ summary.trauma_total }}</td></tr>
+</table>
+
+<table class="summary-table">
+  <tr><th>Casualty Breakdown</th><th class="num">Count</th></tr>
+  <tr><td>Road Crash Victims - Minor Injuries</td><td class="num">{{ summary.victims_minor }}</td></tr>
+  <tr><td>Road Crash Victims - Major Injuries</td><td class="num">{{ summary.victims_major }}</td></tr>
+  <tr><td>Road Crash Victims - Fatalities</td><td class="num">{{ summary.victims_fatality }}</td></tr>
+  <tr><td>Fire Incidents - Casualties / Injured / Fatalities</td><td class="num">{{ summary.fire_casualties }} / {{ summary.fire_injured }} / {{ summary.fire_fatalities }}</td></tr>
+  <tr><td>Water Incidents - Casualties / Injured / Fatalities</td><td class="num">{{ summary.water_casualties }} / {{ summary.water_injured }} / {{ summary.water_fatalities }}</td></tr>
+  <tr class="rollup-total"><td>TOTAL CASUALTIES (all incident types)</td><td class="num">{{ summary.total_casualties }}</td></tr>
+  <tr class="rollup-total"><td>TOTAL INJURED (all incident types)</td><td class="num">{{ summary.total_injured }}</td></tr>
+  <tr class="rollup-total"><td>TOTAL FATALITIES (all incident types)</td><td class="num">{{ summary.total_fatalities }}</td></tr>
+</table>
+
+<!-- ═══ SECTION IV — LIFELINES STATUS ═══ -->
+<div class="section-title">IV. Lifelines Status</div>
+{% if lifelines_sections %}
+  {% for muni in lifelines_sections %}
+    <div class="lifelines-row">
+      <strong>{{ muni.municipality_name }}:</strong>
+      Power: {{ muni.lifelines.get_power_supply_display }},
+      Water: {{ muni.lifelines.get_water_supply_display }},
+      Communication: {{ muni.lifelines.get_communication_display }},
+      Roads: {{ muni.lifelines.get_road_condition_display }},
+      Sea Travel: {{ muni.lifelines.get_sea_travel_display }},
+      Class Suspension: {{ muni.lifelines.class_suspension|yesno:"Yes,No" }}
+      {% if muni.lifelines.power_notes or muni.lifelines.water_notes or muni.lifelines.communication_notes or muni.lifelines.road_notes or muni.lifelines.sea_notes or muni.lifelines.class_suspension_notes %}
+        <div class="lifelines-notes">
+          {% if muni.lifelines.power_notes %}Power: {{ muni.lifelines.power_notes }}. {% endif %}
+          {% if muni.lifelines.water_notes %}Water: {{ muni.lifelines.water_notes }}. {% endif %}
+          {% if muni.lifelines.communication_notes %}Comms: {{ muni.lifelines.communication_notes }}. {% endif %}
+          {% if muni.lifelines.road_notes %}Roads: {{ muni.lifelines.road_notes }}. {% endif %}
+          {% if muni.lifelines.sea_notes %}Sea: {{ muni.lifelines.sea_notes }}. {% endif %}
+          {% if muni.lifelines.class_suspension_notes %}Class Suspension: {{ muni.lifelines.class_suspension_notes }}.{% endif %}
+        </div>
+      {% endif %}
+    </div>
+  {% endfor %}
+{% else %}
+  <p class="no-incidents">No municipality reported lifelines status for this period.</p>
+{% endif %}
+
+<!-- ═══ SECTION VI — ACTIONS TAKEN + SIGNATORIES (one fragmentation unit) ═══ -->
+<div class="closing-block">
+  <div class="section-title">VI. Actions Taken</div>
+  <p class="doc-row">{{ actions_taken|default:"(not provided)" }}</p>
+
+  <div class="footer">
+    <div class="signature">
+      <p><strong>Prepared by:</strong></p>
+      <p class="name">{{ prepared_by }}</p>
+      <p>Quezon PDRRMC - EOC</p>
+
+      <p style="margin-top: 14px;"><strong>Noted by:</strong></p>
+      <p class="name">{{ noted_by }}</p>
+      <p>{{ noted_by_title }}</p>
+
+      <p style="margin-top: 14px;"><strong>Approved by:</strong></p>
+      <p class="name">{{ approved_by }}</p>
+      <p>{{ approved_by_title }}</p>
+    </div>
+    <p class="generated">Generated by Quick SitRep - {% now "d F Y, H:i" %}</p>
+  </div>
+</div>
+
+</body>
+</html>

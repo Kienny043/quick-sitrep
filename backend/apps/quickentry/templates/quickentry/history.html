@@ -1,0 +1,68 @@
+{% extends "quickentry/base.html" %}
+{% load static %}
+{% block title %}Batch History — Quick SitRep{% endblock %}
+{% block body %}
+<div id="app">
+  <header class="topbar">
+    <div class="topbar-title">
+      <img src="{% static 'quickentry/img/logo.png' %}" alt="PDRRMO Logo" class="topbar-logo">
+      <h1>Quick SitRep</h1>
+      <span class="batch-status">Batch History</span>
+    </div>
+    <div class="topbar-user">
+      <span>{{ user.username }}</span>
+      <a href="{% url 'quickentry-main' %}" class="link-button">Back to Dashboard</a>
+      <a href="{% url 'quickentry-settings' %}" class="link-button">Settings</a>
+      <form method="post" action="{% url 'logout' %}" class="logout-form">
+        {% csrf_token %}
+        <button type="submit" class="link-button">Log out</button>
+      </form>
+    </div>
+  </header>
+
+  <main class="settings-page history-page">
+    <section class="settings-card">
+      <h2>Batch History</h2>
+      <p class="settings-hint">
+        Every reporting batch, most recent first. A draft batch stays open here even after
+        its shift window has technically passed — nothing forces you to finish it same-day.
+      </p>
+
+      <table class="history-table">
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Shift</th>
+            <th>Status</th>
+            <th>Entries</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for batch in batches %}
+            <tr>
+              <td>{{ batch.date }}</td>
+              <td>{{ batch.get_shift_display }}</td>
+              <td>
+                <span class="history-status history-status--{{ batch.status|lower }}">{{ batch.status }}</span>
+              </td>
+              <td>{{ batch.entry_count }} / {{ total_municipalities }}</td>
+              <td class="history-action">
+                {% if batch.status == "DRAFT" %}
+                  <a href="{% url 'quickentry-main' %}?batch_id={{ batch.id }}" class="btn btn-small btn-primary">Open</a>
+                {% else %}
+                  <a href="{% url 'quickentry-batch-download' pk=batch.id %}" class="btn btn-small">Download PDF</a>
+                {% endif %}
+              </td>
+            </tr>
+          {% empty %}
+            <tr>
+              <td colspan="5" class="history-empty">No batches yet.</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  </main>
+</div>
+{% endblock %}
