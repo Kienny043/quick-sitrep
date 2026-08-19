@@ -1,0 +1,426 @@
+"""
+Quick SitRep — AI extraction.
+
+extract_incident_data(municipality_name, raw_text) -> dict
+
+Single-provider MVP (Groq only, called directly via `requests` — no groq
+SDK dependency for one provider). See docs/quick-report-entry-spec.md
+Section 5. Fallback to other providers can be added later the same way
+the main system's apps/ops/ai.py does it, if Groq reliability becomes an
+issue for this tool too.
+"""
+
+import json
+import re
+import threading
+import time
+
+import requests
+from django.conf import settings
+
+GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
+# NOTE: llama-3.3-70b-versatile (used by the main system's apps/ops/ai.py)
+# has been retired from Groq's catalog as of this writing — confirmed via
+# GET /openai/v1/models, which 404s for that model id. Using a current
+# model instead; re-check Groq's model list if this ever starts 404ing.
+GROQ_MODEL = "openai/gpt-oss-120b"
+
+# Groq's free tier has a per-minute token budget (hit directly during
+# Step 3 testing — two calls back-to-back with this system prompt was
+# enough to trip it). Retry only on 429; anything else is a real error,
+# not a transient one, so it fails immediately.
+MAX_ATTEMPTS = 3
+INITIAL_BACKOFF_SECONDS = 2
+
+# Hard cap on completion tokens per call — also doubles as the proactive
+# rate-limit safety margin below (it's the single largest, most variable
+# cost component of a call; the system prompt itself is fixed and
+# comparatively small — confirmed at ~2804 prompt tokens via Groq's own
+# `usage` field on a real call, not a chars/4 guess, which undercounts
+# for this JSON-schema-heavy prompt).
+MAX_TOKENS = 4096
+
+
+class ExtractionError(Exception):
+    """Raised when the Groq call fails or its response isn't valid JSON."""
+
+
+SYSTEM_PROMPT = """You are extracting structured incident data from a Philippine LGU disaster
+response report (Quezon Province PDRRMO). Reports typically follow a
+semi-structured WHAT/WHEN/WHERE convention, but field labels vary between
+reports even for the same meaning. Your job: normalize this into the JSON
+schema below. The municipality is provided separately — never include or
+guess it.
+
+LABEL ALIASES (same meaning, different wording seen in real reports):
+- Victims: "PERSONS INVOLVED", "PATIENT DETAILS", "VICTIM", "PATIENT",
+  "RIDER"/"BACKRIDER" (lettered A/B lists are multiple victims)
+- Responding team: "RESPONDERS", "RESPONDING TEAM", "RESPONDING UNIT"
+- Illness reason: "CAUSE OF ILLNESS", "NATURE OF ILLNESS", "CHIEF COMPLAINT"
+- Vitals (BP/PR/SpO2/Temp) are often embedded inline inside ACTIONS TAKEN
+  text in parentheses, not as separate labeled lines — pull them out into
+  their own fields when you see them there.
+
+RULES:
+- Empty arrays are valid and common — "no incidents" is a normal result.
+- Never guess a value you're not confident about. Prefer null/omission and
+  put the uncertain fragment into unmapped_notes instead.
+- Never compute summary counts or totals — that's handled downstream.
+- For fire incidents: if there's an "IPO" line, it usually contains a
+  location/incident description, NOT a time — map that text into
+  location/barangay, leave the ipo field null, and also note it in
+  unmapped_notes. Only extract dtr/ted/tas as times if clearly labeled
+  with actual clock times.
+- If a per-person or per-item qualitative detail (symptom, condition,
+  notable circumstance) can't be preserved because the target field only
+  holds an aggregate count or a bare classification, note the specific
+  detail in unmapped_notes even though the count/classification itself was
+  confident. Never let a real detail exist only inside a coarse number.
+
+JSON SCHEMA:
+{
+  "lifelines_status": {
+    "power_supply": "OPERATIONAL | INTERRUPTED | UNDER_REPAIR",
+    "power_supply_notes": "string",
+    "water_supply": "OPERATIONAL | INTERRUPTED | UNDER_REPAIR",
+    "water_supply_notes": "string",
+    "communication": "OPERATIONAL | INTERRUPTED | UNDER_REPAIR",
+    "communication_notes": "string",
+    "road_condition": "PASSABLE | IMPASSABLE | FLOODED",
+    "road_notes": "string",
+    "sea_travel": "NORMAL | SUSPENDED | MODIFIED",
+    "sea_notes": "string",
+    "class_suspension": "boolean",
+    "class_suspension_notes": "string"
+  },
+  "road_crashes": [
+    {
+      "datetime": "string (raw as reported)",
+      "location": "string", "barangay": "string or null",
+      "cause": "string", "vehicles_involved": "string",
+      "actions_taken": "string", "responding_team": "string",
+      "driver": "string or null", "ert_members": "string or null",
+      "victims": [
+        { "age": "number or null", "sex": "string or null", "address": "string or null",
+          "injuries": "string", "injury_classification": "MINOR | MAJOR | FATALITY" }
+      ]
+    }
+  ],
+  "medical_assistance": [
+    {
+      "datetime": "string", "location": "string", "barangay": "string or null",
+      "patient_age": "number or null", "patient_sex": "string or null", "patient_address": "string or null",
+      "nature_of_illness": "string", "chief_complaint": "string or null",
+      "blood_pressure": "string or null", "pulse_rate": "string or null",
+      "spo2": "string or null", "temperature": "string or null",
+      "actions_taken": "string", "responding_team": "string",
+      "driver": "string or null", "ert_members": "string or null"
+    }
+  ],
+  "fire_incidents": [
+    {
+      "datetime": "string", "location": "string", "barangay": "string or null",
+      "ipo": "string or null (REQUIRED before save)", "dtr": "string or null (REQUIRED before save)",
+      "ted": "string or null (REQUIRED before save)", "tas": "string or null (REQUIRED before save)",
+      "response_time_minutes": "number or 0", "distance_km": "number or 0",
+      "structure_type": "string", "families_affected": "number or 0",
+      "individuals_affected": "number or 0", "structures_burned": "number or 0",
+      "fire_area_sqm": "number or 0", "casualties": "number or 0",
+      "injured": "number or 0", "fatalities": "number or 0",
+      "responding_team": "string", "actions_taken": "string"
+    }
+  ],
+  "water_incidents": [
+    {
+      "datetime": "string", "location": "string", "barangay": "string or null",
+      "incident_type": "string (free text)", "description": "string or null",
+      "families_affected": "number or 0", "individuals_affected": "number or 0",
+      "casualties": "number or 0", "injured": "number or 0", "fatalities": "number or 0",
+      "responding_team": "string", "actions_taken": "string"
+    }
+  ],
+  "trauma_emergencies": [
+    {
+      "datetime": "string", "location": "string", "barangay": "string or null",
+      "call_type": "string (free text)", "patient_age": "number or null",
+      "patient_sex": "string or null", "patient_address": "string or null",
+      "chief_complaint": "string or null", "actions_taken": "string",
+      "responding_team": "string", "driver": "string or null", "ert_members": "string or null"
+    }
+  ],
+  "unmapped_notes": "Anything found but not confidently placed above — surfaced to OPS, never silently dropped."
+}
+
+EXAMPLES:
+
+---
+INPUT:
+WHAT: Road Crash (Collision)
+WHEN: February 10, 2026 | 1400H
+WHERE: Brgy. Malabo, Sample Town, Quezon
+VEHICLE INVOLVED: 1 Motorcycle
+PATIENT DETAILS: Male, 40 years old, resident of Brgy. Malabo
+INJURIES: Lacerated wound on left knee; abrasion on left arm
+ACTIONS TAKEN: Ensured scene safety, assessed patient and provided first aid, and transported to Sample District Hospital
+RESPONDING UNIT: Team Bravo | AMBULANCE: Rescue 102 | DRIVER: J. Cruz | ERT: M. Santos, L. Reyes
+
+OUTPUT:
+{
+  "lifelines_status": {},
+  "road_crashes": [{
+    "datetime": "February 10, 2026 | 1400H",
+    "location": "Brgy. Malabo, Sample Town, Quezon", "barangay": "Malabo",
+    "cause": null, "vehicles_involved": "1 Motorcycle",
+    "actions_taken": "Ensured scene safety, assessed patient and provided first aid, and transported to Sample District Hospital",
+    "responding_team": "Team Bravo", "driver": "J. Cruz", "ert_members": "M. Santos, L. Reyes",
+    "victims": [{ "age": 40, "sex": "Male", "address": "Brgy. Malabo",
+      "injuries": "Lacerated wound on left knee; abrasion on left arm",
+      "injury_classification": "MINOR" }]
+  }],
+  "medical_assistance": [], "fire_incidents": [], "water_incidents": [], "trauma_emergencies": [],
+  "unmapped_notes": "Ambulance unit noted as 'Rescue 102' — no matching field in schema."
+}
+---
+INPUT:
+WHAT: Road Crash
+WHEN: February 11, 2026 | 0900H
+WHERE: Brgy. Riverside, Sample City (near the public market)
+CAUSE OF INCIDENT: Brake failure
+VEHICLES INVOLVED: 1 tricycle and 1 jeepney
+PERSONS INVOLVED:
+A. Male, 60 years old — Suspected fracture of left leg
+B. Female, 15 years old — Minor abrasions on both knees
+RESPONDERS: Sample City DRRMO Team Alpha, Brgy. Officials of Riverside, PNP Sample City
+ACTIONS TAKEN: Coordinated with BFP and PNP upon receiving the report; ensured scene safety; provided pre-hospital medical treatment; monitored vital signs; transported Victim A to Sample General Hospital and endorsed Victim B to on-scene medics.
+
+OUTPUT:
+{
+  "lifelines_status": {},
+  "road_crashes": [{
+    "datetime": "February 11, 2026 | 0900H",
+    "location": "Brgy. Riverside, Sample City (near the public market)", "barangay": "Riverside",
+    "cause": "Brake failure", "vehicles_involved": "1 tricycle and 1 jeepney",
+    "actions_taken": "Coordinated with BFP and PNP upon receiving the report; ensured scene safety; provided pre-hospital medical treatment; monitored vital signs; transported Victim A to Sample General Hospital and endorsed Victim B to on-scene medics.",
+    "responding_team": "Sample City DRRMO Team Alpha, Brgy. Officials of Riverside, PNP Sample City",
+    "driver": null, "ert_members": null,
+    "victims": [
+      { "age": 60, "sex": "Male", "address": null, "injuries": "Suspected fracture of left leg", "injury_classification": "MAJOR" },
+      { "age": 15, "sex": "Female", "address": null, "injuries": "Minor abrasions on both knees", "injury_classification": "MINOR" }
+    ]
+  }],
+  "medical_assistance": [], "fire_incidents": [], "water_incidents": [], "trauma_emergencies": [],
+  "unmapped_notes": ""
+}
+---
+INPUT:
+IPO: Residential Fire at Sample Homes, Brgy. Malinis, Sample City
+DTR: 15 February 2026 | 1000H
+TED: 15 February 2026 | 1002H
+TAS: 15 February 2026 | 1006H
+RESPONSE TIME: 4 minutes
+DISTANCE: 2.0 km
+TYPE OF STRUCTURE: Single-Storey Residential
+NO. OF FAMILIES AFFECTED: 1
+NO. OF INDIVIDUALS AFFECTED: 3
+
+OUTPUT:
+{
+  "lifelines_status": {},
+  "road_crashes": [], "medical_assistance": [],
+  "fire_incidents": [{
+    "datetime": "15 February 2026 | 1000H", "location": "Sample Homes, Brgy. Malinis, Sample City", "barangay": "Malinis",
+    "ipo": null, "dtr": "15 February 2026 | 1000H", "ted": "15 February 2026 | 1002H", "tas": "15 February 2026 | 1006H",
+    "response_time_minutes": 4, "distance_km": 2.0, "structure_type": "Single-Storey Residential",
+    "families_affected": 1, "individuals_affected": 3, "structures_burned": 0, "fire_area_sqm": 0,
+    "casualties": 0, "injured": 0, "fatalities": 0, "responding_team": null, "actions_taken": null
+  }],
+  "water_incidents": [], "trauma_emergencies": [],
+  "unmapped_notes": "IPO line described as residential fire at Sample Homes — no explicit 'point of origin' time given; ipo field left for manual entry."
+}
+---
+
+Return ONLY the JSON object. No markdown code fences, no commentary before or after."""
+
+
+# ── Proactive rate-limit cooldown ───────────────────────────────────
+# Reactive, not predictive: we never guess how expensive a report will be
+# to process. Instead, every real Groq response tells us exactly how much
+# token budget is left and exactly when it recovers (x-ratelimit-remaining-
+# tokens / x-ratelimit-reset-tokens — confirmed against real responses,
+# not assumed). If that looks thin, the *next* call waits for the
+# reported recovery time before it even tries, instead of firing and
+# hoping. In-memory only — fine for this single-process dev tool.
+#
+# TOKEN_COOLDOWN_THRESHOLD = MAX_TOKENS is empirically validated in this
+# repo: a real call attempted with 3815 tokens remaining (< 4096) hit a
+# 429; one attempted with 7917 remaining (> 4096) succeeded.
+TOKEN_COOLDOWN_THRESHOLD = MAX_TOKENS
+
+# Cap how long we'll ever proactively wait, in case a header is ever
+# malformed and produces an unreasonable duration.
+MAX_COOLDOWN_WAIT_SECONDS = 90
+
+_rate_limit_lock = threading.Lock()
+_rate_limit_state = {"available_at": 0.0}  # epoch seconds; 0.0 = no known cooldown
+
+_GO_DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)(h|ms|m|s)")
+
+
+def _parse_go_duration(text):
+    """
+    Groq's x-ratelimit-reset-* headers use Go's time.Duration.String()
+    format ("622ms", "45.989s", "1m26.4s" — confirmed against real
+    responses). Returns seconds as a float, or None if it doesn't look
+    like this format at all.
+    """
+    if not text:
+        return None
+    total = 0.0
+    matched = False
+    for value, unit in _GO_DURATION_RE.findall(text):
+        matched = True
+        value = float(value)
+        if unit == "h":
+            total += value * 3600
+        elif unit == "m":
+            total += value * 60
+        elif unit == "ms":
+            total += value / 1000
+        else:  # "s"
+            total += value
+    return total if matched else None
+
+
+def _record_rate_limit(response):
+    """Called after every real Groq response (success or 429)."""
+    remaining = response.headers.get("x-ratelimit-remaining-tokens")
+    reset = response.headers.get("x-ratelimit-reset-tokens")
+    if remaining is None or reset is None:
+        return
+    try:
+        remaining = int(remaining)
+    except ValueError:
+        return
+    if remaining >= TOKEN_COOLDOWN_THRESHOLD:
+        return
+
+    reset_seconds = _parse_go_duration(reset)
+    if reset_seconds is None:
+        return
+    reset_seconds = min(reset_seconds, MAX_COOLDOWN_WAIT_SECONDS)
+
+    with _rate_limit_lock:
+        _rate_limit_state["available_at"] = time.time() + reset_seconds
+
+
+def seconds_until_available():
+    """
+    Public — used both by _wait_for_cooldown() below and by the
+    /api/ai-status/ view, so the frontend can show a countdown and
+    disable "Process with AI" *before* OPS clicks into a call that would
+    just block.
+    """
+    with _rate_limit_lock:
+        available_at = _rate_limit_state["available_at"]
+    return max(0.0, available_at - time.time())
+
+
+def _wait_for_cooldown():
+    remaining = seconds_until_available()
+    if remaining > 0:
+        time.sleep(remaining)
+
+
+def _post_with_retry(payload: dict, api_key: str) -> requests.Response:
+    """
+    POST to Groq. Waits out any known cooldown first (see above), then
+    retries only on 429 — using the Retry-After header when Groq sends
+    one (confirmed present on real 429s: a plain integer number of
+    seconds), falling back to exponential backoff (2s, 4s —
+    MAX_ATTEMPTS total) when it doesn't. Any other failure (network
+    error, 4xx/5xx besides 429) is not transient and raises immediately
+    rather than burning retries on something that won't recover on its
+    own.
+    """
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    _wait_for_cooldown()
+
+    delay = INITIAL_BACKOFF_SECONDS
+
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            resp = requests.post(GROQ_CHAT_URL, headers=headers, json=payload, timeout=60)
+        except requests.RequestException as exc:
+            raise ExtractionError(f"Groq request failed: {exc}") from exc
+
+        _record_rate_limit(resp)
+
+        if resp.status_code != 429:
+            resp.raise_for_status()
+            return resp
+
+        if attempt == MAX_ATTEMPTS:
+            raise ExtractionError(
+                "The AI service is busy (rate-limited) and didn't recover after "
+                f"{MAX_ATTEMPTS} attempts. Wait a moment and try again."
+            )
+
+        retry_after = resp.headers.get("Retry-After")
+        wait_seconds = None
+        if retry_after:
+            try:
+                wait_seconds = float(retry_after)
+            except ValueError:
+                wait_seconds = None
+        if wait_seconds is None:
+            wait_seconds = delay
+        time.sleep(wait_seconds)
+        delay *= 2
+
+    raise ExtractionError("Groq request failed after retries.")  # unreachable
+
+
+def extract_incident_data(municipality_name: str, raw_text: str) -> dict:
+    """
+    Extract structured incident data from one municipality's pasted report
+    text. municipality_name is accepted for the caller's own logging/audit
+    trail — it is deliberately never sent to the model as something to
+    fill in or guess (the schema has no municipality field; see the system
+    prompt).
+    """
+    api_key = getattr(settings, "GROQ_API_KEY", "")
+    if not api_key:
+        raise ExtractionError("GROQ_API_KEY is not configured.")
+
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": raw_text},
+        ],
+        "temperature": 0.1,
+        "max_tokens": MAX_TOKENS,
+        "response_format": {"type": "json_object"},
+        "stream": False,
+    }
+
+    resp = _post_with_retry(payload, api_key)
+
+    try:
+        content = resp.json()["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, ValueError) as exc:
+        raise ExtractionError(f"Unexpected Groq response shape: {exc}") from exc
+
+    # Defensive: strip markdown fences in case the model adds them anyway.
+    if content.startswith("```"):
+        content = content.strip("`").strip()
+        if content.lower().startswith("json"):
+            content = content[4:].strip()
+
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise ExtractionError(
+            f"Groq response was not valid JSON: {exc}. Raw response: {content[:500]}"
+        ) from exc
