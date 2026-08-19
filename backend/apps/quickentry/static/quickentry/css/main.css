@@ -1,0 +1,407 @@
+:root {
+  --navy: #102b6a;
+  --navy-dark: #0b1f4d;
+  --red: #dc2626;
+  --green: #15803d;
+  --amber: #b45309;
+  --border: #d8dde6;
+  --bg: #f4f6fb;
+  --card-bg: #ffffff;
+  --text: #1a2233;
+  --text-muted: #5b6577;
+  --radius: 8px;
+
+  /* Main project's exact palette (frontend/src/index.css) — used only by
+     the summary cards below, to match OpsDashboard's visual recipe. Kept
+     separate from this file's own --navy/--red/etc. tokens above rather
+     than replacing them, since this feature is scoped to the cards, not
+     a full re-theme of the rest of the page. */
+  --color-pd-navy: #102B6A;
+  --color-pd-red: #D62828;
+  --color-pd-gold: #F4A300;
+  --color-pd-green: #1FAF38;
+  --color-pd-gray: #F0F2F5;
+  --color-pd-text-primary: #0B1F3A;
+  --color-pd-text-secondary: #4B5563;
+  --color-pd-border: #D6DCE5;
+  --color-blue: #2563EB;
+  --color-purple: #9333EA;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+h1, h2, h3, h4 { margin: 0 0 0.4em; font-weight: 700; }
+
+/* ── Login ────────────────────────────────────────────── */
+.login-wrap {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(160deg, var(--navy-dark), var(--navy));
+}
+.login-card {
+  background: var(--card-bg);
+  padding: 2.5rem;
+  border-radius: var(--radius);
+  width: 100%;
+  max-width: 340px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.35);
+}
+.login-card h1 { color: var(--navy); font-size: 1.4rem; }
+.login-card .subtitle { color: var(--text-muted); margin-bottom: 1.5rem; font-size: 0.85rem; }
+.login-card label { display: block; margin-bottom: 1rem; font-size: 0.85rem; font-weight: 600; }
+.login-card input[type="text"],
+.login-card input[type="password"] {
+  display: block; width: 100%; margin-top: 0.35rem;
+  padding: 0.6rem 0.7rem; border: 1px solid var(--border); border-radius: 6px; font-size: 0.95rem;
+}
+
+/* ── Buttons / alerts (shared) ───────────────────────────── */
+.btn {
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: 6px;
+  padding: 0.5rem 0.9rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.btn:hover { background: #f0f2f7; }
+.btn-primary { background: var(--navy); border-color: var(--navy); color: #fff; }
+.btn-primary:hover { background: var(--navy-dark); }
+.btn-primary:disabled { background: #9aa4bd; border-color: #9aa4bd; cursor: not-allowed; }
+.btn-danger { color: var(--red); }
+.btn-small { padding: 0.3rem 0.6rem; font-size: 0.78rem; }
+.btn-block { width: 100%; }
+.link-button {
+  background: none; border: none; color: #cbd5f5; text-decoration: underline;
+  cursor: pointer; font-size: 0.85rem;
+}
+
+.alert { border-radius: 6px; padding: 0.6rem 0.8rem; font-size: 0.85rem; margin: 0.6rem 0; }
+.alert-error { background: #fdecec; color: #991b1b; border: 1px solid #f5b5b5; }
+.alert-success { background: #ecfdf3; color: #15803d; border: 1px solid #a7e3bc; }
+.alert-warning { background: #fffaeb; color: #92400e; border: 1px solid #fbd38d; }
+.alert ul { margin: 0.3rem 0 0; padding-left: 1.1rem; }
+
+/* ── App shell ────────────────────────────────────────── */
+.topbar {
+  background: var(--navy);
+  color: #fff;
+  padding: 0.9rem 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.topbar-title { display: flex; align-items: center; gap: 0.7rem; }
+.topbar-logo { width: 34px; height: 34px; object-fit: contain; flex-shrink: 0; }
+.topbar-title h1 { font-size: 1.15rem; }
+.batch-status { font-size: 0.8rem; color: #cbd5f5; }
+.batch-status a { color: #fca5a5; font-weight: 600; }
+.topbar-user { display: flex; align-items: center; gap: 0.8rem; font-size: 0.85rem; }
+.logout-form { display: inline; }
+
+/* ── Summary cards (batch-scoped — no trends/sparklines/dark mode,
+   see OpsDashboard for the fuller version this is adapted from) ── */
+.summary-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 1rem;
+  padding: 1.25rem 1.25rem 0;
+}
+.summary-card {
+  background: #fff;
+  border-radius: 1rem;
+  padding: 1.1rem;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
+}
+.summary-card .icon-badge {
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 0.7rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 0.7rem;
+}
+.summary-card .icon-badge svg { width: 16px; height: 16px; }
+.summary-card .card-value {
+  font-family: 'Sora', -apple-system, "Segoe UI", sans-serif;
+  font-size: 1.75rem;
+  font-weight: 700;
+  line-height: 1;
+  margin-bottom: 0.3rem;
+}
+.summary-card .card-label {
+  font-family: 'DM Sans', -apple-system, "Segoe UI", sans-serif;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--color-pd-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Border/badge tints computed as plain rgba() (not color-mix(), for
+   broader browser support) — mirrors the main project's Tailwind
+   `border-pd-gold/20`, `bg-pd-gold/10` opacity convention directly. */
+.summary-card--road { border: 1px solid rgba(244, 163, 0, 0.25); }
+.summary-card--road .icon-badge { background: rgba(244, 163, 0, 0.12); color: var(--color-pd-gold); }
+.summary-card--road .card-value { color: var(--color-pd-gold); }
+
+.summary-card--medical, .summary-card--fire {
+  border: 1px solid rgba(214, 40, 40, 0.2);
+}
+.summary-card--medical .icon-badge, .summary-card--fire .icon-badge {
+  background: rgba(214, 40, 40, 0.1);
+  color: var(--color-pd-red);
+}
+.summary-card--medical .card-value, .summary-card--fire .card-value { color: var(--color-pd-red); }
+
+.summary-card--water { border: 1px solid rgba(37, 99, 235, 0.2); }
+.summary-card--water .icon-badge { background: rgba(37, 99, 235, 0.1); color: var(--color-blue); }
+.summary-card--water .card-value { color: var(--color-blue); }
+
+.summary-card--trauma { border: 1px solid rgba(147, 51, 234, 0.2); }
+.summary-card--trauma .icon-badge { background: rgba(147, 51, 234, 0.1); color: var(--color-purple); }
+.summary-card--trauma .card-value { color: var(--color-purple); }
+
+/* ── Settings page (/settings/) — same palette/fonts as the summary
+   cards, scoped locally rather than changing the page's default fonts. */
+.settings-page {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 2rem 1.25rem;
+}
+.settings-card {
+  background: #fff;
+  border: 1px solid var(--color-pd-border);
+  border-radius: 1rem;
+  padding: 1.75rem 2rem;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
+}
+.settings-card h2 {
+  font-family: 'Sora', -apple-system, "Segoe UI", sans-serif;
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--color-pd-navy);
+  margin: 0 0 0.5rem;
+}
+.settings-hint {
+  font-family: 'DM Sans', -apple-system, "Segoe UI", sans-serif;
+  font-size: 0.82rem;
+  color: var(--color-pd-text-secondary);
+  line-height: 1.5;
+  margin: 0 0 1.25rem;
+}
+.settings-field {
+  display: block;
+  font-family: 'DM Sans', -apple-system, "Segoe UI", sans-serif;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-pd-text-secondary);
+  margin-bottom: 1.1rem;
+}
+.settings-field input {
+  display: block;
+  width: 100%;
+  margin-top: 0.4rem;
+  font-family: 'DM Sans', -apple-system, "Segoe UI", sans-serif;
+  font-size: 0.92rem;
+  font-weight: 400;
+  color: var(--color-pd-text-primary);
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--color-pd-border);
+  border-radius: 0.5rem;
+}
+.settings-field input:focus {
+  outline: none;
+  border-color: var(--color-pd-navy);
+}
+.settings-card .actions { margin-top: 0.5rem; }
+.settings-card .btn-primary { background: var(--color-pd-navy); border-color: var(--color-pd-navy); }
+.settings-card .btn-primary:hover { background: #0b1f4d; }
+
+/* ── Batch History (/history/) — same card shell as Settings, wider. ── */
+.history-page { max-width: 900px; }
+.history-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: 'DM Sans', -apple-system, "Segoe UI", sans-serif;
+  font-size: 0.85rem;
+}
+.history-table th {
+  text-align: left;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-pd-text-secondary);
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--color-pd-border);
+}
+.history-table td {
+  padding: 0.65rem 0.6rem;
+  border-bottom: 1px solid var(--color-pd-border);
+  color: var(--color-pd-text-primary);
+}
+.history-status {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+}
+.history-status--draft { background: var(--color-pd-gray); color: var(--color-pd-text-secondary); }
+.history-status--finalized { background: rgba(31, 175, 56, 0.12); color: var(--color-pd-green); }
+.history-action { text-align: right; }
+.history-empty { text-align: center; color: var(--color-pd-text-secondary); padding: 1.5rem !important; }
+
+.layout {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  gap: 1.25rem;
+  padding: 1.25rem;
+  align-items: start;
+}
+@media (max-width: 860px) {
+  .layout { grid-template-columns: 1fr; }
+}
+
+.checklist-panel, .entry-panel {
+  background: var(--card-bg);
+  border-radius: var(--radius);
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--border);
+}
+.checklist-panel h2 { font-size: 0.95rem; display: flex; justify-content: space-between; }
+#checklist-progress { font-weight: 500; color: var(--text-muted); font-size: 0.8rem; }
+
+.checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  max-height: 75vh;
+  overflow-y: auto;
+}
+.checklist-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  text-align: left;
+  padding: 0.45rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: none;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.checklist-item:hover { background: #f0f2f7; }
+.checklist-item.selected { border-color: var(--navy); background: #eef1fb; }
+.checklist-item.done .check-name { color: var(--green); }
+.checklist-item.locked { cursor: not-allowed; opacity: 0.55; }
+.checklist-item.locked:hover { background: none; }
+.check-dot {
+  width: 1.1rem; height: 1.1rem; border-radius: 50%;
+  border: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.7rem; color: var(--green); flex-shrink: 0;
+}
+.checklist-item.done .check-dot { border-color: var(--green); }
+.check-name { flex: 1; }
+.check-status { font-size: 0.68rem; color: var(--text-muted); }
+
+.entry-placeholder { color: var(--text-muted); }
+
+/* ── Paste box ────────────────────────────────────────── */
+.paste-box textarea {
+  width: 100%; font-family: inherit; font-size: 0.9rem;
+  padding: 0.6rem; border: 1px solid var(--border); border-radius: 6px;
+}
+.paste-box .actions { margin-top: 0.6rem; }
+.raw-text-readonly { margin: 0.5rem 0 1rem; }
+.raw-text-readonly pre {
+  white-space: pre-wrap; background: #f7f8fb; border: 1px solid var(--border);
+  border-radius: 6px; padding: 0.7rem; font-size: 0.8rem; max-height: 240px; overflow: auto;
+}
+
+/* ── Unmapped notes ───────────────────────────────────── */
+.unmapped-box {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 0.8rem 1rem; margin-bottom: 1rem; background: #fafafa;
+}
+.unmapped-box--active { border-color: #fbd38d; background: #fffaf0; }
+.unmapped-box h3 { font-size: 0.85rem; color: var(--amber); }
+.unmapped-box textarea { width: 100%; font-family: inherit; font-size: 0.85rem; padding: 0.5rem; border: 1px solid var(--border); border-radius: 6px; }
+
+/* ── Incident sections / cards ───────────────────────── */
+.incident-section { margin-bottom: 1.2rem; }
+.section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; }
+.section-header h3 { font-size: 0.95rem; }
+.section-header h4 { font-size: 0.85rem; }
+.count-badge {
+  display: inline-block; margin-left: 0.4rem; background: #eef1fb; color: var(--navy);
+  border-radius: 999px; padding: 0.05rem 0.5rem; font-size: 0.72rem; font-weight: 700;
+}
+.empty-hint { color: var(--text-muted); font-size: 0.82rem; }
+
+.card {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 0.8rem 0.9rem; margin-bottom: 0.7rem; background: #fcfcfd;
+}
+.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
+.card-title { font-weight: 600; font-size: 0.85rem; }
+
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.6rem 0.8rem;
+}
+.field { display: flex; flex-direction: column; font-size: 0.78rem; font-weight: 600; color: var(--text-muted); gap: 0.25rem; }
+.field input, .field select, .field textarea {
+  font-family: inherit; font-size: 0.85rem; font-weight: 400; color: var(--text);
+  padding: 0.4rem 0.5rem; border: 1px solid var(--border); border-radius: 6px;
+}
+.field textarea { resize: vertical; }
+.field-hint { font-size: 0.68rem; font-weight: 400; color: var(--text-muted); font-style: italic; }
+.field-missing input { border-color: var(--red); background: #fff5f5; }
+.field-missing .field-label { color: var(--red); }
+
+.victims-block { margin-top: 0.7rem; padding-top: 0.6rem; border-top: 1px dashed var(--border); }
+.victim-row { border: 1px dashed var(--border); border-radius: 6px; padding: 0.6rem; margin-bottom: 0.5rem; }
+
+.save-actions { display: flex; gap: 0.6rem; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+
+/* ── Finalize panel ───────────────────────────────────── */
+.finalize-panel {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem 1.25rem 1.25rem;
+  margin: 0 1.25rem 1.25rem;
+}
+.finalize-panel h2 { font-size: 0.95rem; }
+.finalize-progress { font-size: 0.85rem; color: var(--text-muted); margin: 0 0 0.8rem; }
+.finalize-progress span { font-weight: 700; color: var(--navy); }
+.finalize-field {
+  display: block; font-size: 0.8rem; font-weight: 600; color: var(--text-muted);
+  margin-bottom: 0.8rem;
+}
+.finalize-field textarea {
+  display: block; width: 100%; margin-top: 0.35rem; font-family: inherit;
+  font-size: 0.88rem; font-weight: 400; color: var(--text);
+  padding: 0.5rem 0.6rem; border: 1px solid var(--border); border-radius: 6px; resize: vertical;
+}
+.finalize-panel .actions { margin-top: 0.4rem; }
+.finalize-panel .alert-success { margin-bottom: 0.8rem; }

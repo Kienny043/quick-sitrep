@@ -1,0 +1,58 @@
+{% extends "quickentry/base.html" %}
+{% load static %}
+{% block title %}Quick SitRep{% endblock %}
+{% block body %}
+<div id="app">
+  <header class="topbar">
+    <div class="topbar-title">
+      <img src="{% static 'quickentry/img/logo.png' %}" alt="PDRRMO Logo" class="topbar-logo">
+      <h1>Quick SitRep</h1>
+      <span id="batch-status" class="batch-status">Loading batch…</span>
+    </div>
+    <div class="topbar-user">
+      <span>{{ user.username }}</span>
+      <a href="{% url 'quickentry-history' %}" class="link-button">History</a>
+      <a href="{% url 'quickentry-settings' %}" class="link-button">Settings</a>
+      <form method="post" action="{% url 'logout' %}" class="logout-form">
+        {% csrf_token %}
+        <button type="submit" class="link-button">Log out</button>
+      </form>
+    </div>
+  </header>
+
+  <section class="summary-cards" id="summary-cards"></section>
+
+  <main class="layout">
+    <section class="checklist-panel">
+      <h2>Municipalities <span id="checklist-progress"></span></h2>
+      <div id="checklist" class="checklist"></div>
+    </section>
+
+    <section class="entry-panel" id="entry-panel">
+      <p class="entry-placeholder">Select a municipality to begin.</p>
+    </section>
+  </main>
+
+  <section class="finalize-panel" id="finalize-panel"></section>
+</div>
+
+{{ incident_schema|json_script:"incident-schema-data" }}
+<script>
+  window.QUICKSITREP = {
+    endpoints: {
+      aiStatus: "{% url 'quickentry-ai-status' %}",
+      currentBatch: "{% url 'quickentry-current-batch' %}",
+      extract: "{% url 'quickentry-entries-extract' %}",
+      save: "{% url 'quickentry-entries-save' %}",
+      finalizeTemplate: "{% url 'quickentry-batch-finalize' pk=999999 %}",
+      downloadTemplate: "{% url 'quickentry-batch-download' pk=999999 %}",
+      entryDetailTemplate: "{% url 'quickentry-entry-detail' pk=999999 %}"
+    },
+    // Required-field metadata derived live from the serializers (see
+    // serializers.get_incident_schema) — drives the generalized
+    // blocking-validation UI instead of a hardcoded JS copy.
+    schema: JSON.parse(document.getElementById("incident-schema-data").textContent)
+  };
+</script>
+<script src="{% static 'quickentry/js/main.js' %}"></script>
+{% endblock %}
