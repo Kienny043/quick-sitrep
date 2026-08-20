@@ -55,7 +55,18 @@ guess it.
 LABEL ALIASES (same meaning, different wording seen in real reports):
 - Victims: "PERSONS INVOLVED", "PATIENT DETAILS", "VICTIM", "PATIENT",
   "RIDER"/"BACKRIDER" (lettered A/B lists are multiple victims)
-- Responding team: "RESPONDERS", "RESPONDING TEAM", "RESPONDING UNIT"
+- Responding team NAME (e.g. "TEAM ALPHA", "TEAM ZULU") → responding_team:
+  "RESPONDING TEAM", "RESPONDING UNIT"
+- Individual responder NAMES (e.g. "R. Racoma, T. Dayo, R. Villa") →
+  ert_members: "RESPONDERS", "ERT"
+- These are NOT aliases of each other, even though "RESPONDERS" and
+  "RESPONDING TEAM/UNIT" sound similar — a report very often states BOTH
+  as two separate pieces of information (the team's name, then who was
+  on it), e.g. "RESPONDING TEAM: TEAM ZULU | DRIVER: S. Calma |
+  RESPONDERS: R. Racoma, T. Dayo, R. Villa" has a team name AND a
+  personnel list, not one repeated twice. Map each label to its own
+  field; never let populating one cause the other to be dropped or left
+  in unmapped_notes.
 - Illness reason: "CAUSE OF ILLNESS", "NATURE OF ILLNESS", "CHIEF COMPLAINT"
 - Vitals (BP/PR/SpO2/Temp) are often embedded inline inside ACTIONS TAKEN
   text in parentheses, not as separate labeled lines — pull them out into
