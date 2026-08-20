@@ -211,6 +211,7 @@ const state = {
   extraction: null,        // editable, UI-normalized copy
   originalExtraction: null, // untouched AI response, for ai_output's audit-trail contract
   reopenedEntryId: null,   // set when the form was populated from a saved entry, not a fresh extract
+  forceNewPaste: false,    // true after "Add Another Report" — show the paste box even though this municipality already has entries
   finalizeForm: { synopsis: "", weather_conditions: "", actions_taken: "" },
 };
 
@@ -562,6 +563,29 @@ function renderUnmappedNotes() {
   `;
 }
 
+function renderEntryList(muni) {
+  const items = muni.entries.map((e) => {
+    const when = e.processed_at ? new Date(e.processed_at).toLocaleString() : "(unsaved)";
+    return `
+      <button type="button" class="entry-list-item" data-entry-id="${e.id}">
+        <span class="entry-list-meta">${escapeHtml(when)} <span class="entry-list-status">${escapeHtml(e.status)}</span></span>
+        <span class="entry-list-preview">${escapeHtml(e.preview)}</span>
+      </button>
+    `;
+  }).join("");
+
+  return `
+    <p class="entry-list-hint">
+      ${muni.entry_count} report${muni.entry_count === 1 ? "" : "s"} saved for this municipality.
+      Click one to open it, or add another below.
+    </p>
+    <div class="entry-list">${items}</div>
+    <div class="actions">
+      <button type="button" class="btn btn-primary" data-action="add-report">Add Another Report</button>
+    </div>
+  `;
+}
+
 function renderEntryPanel() {
   const panel = document.getElementById("entry-panel");
 
@@ -583,7 +607,13 @@ function renderEntryPanel() {
   const muni = state.municipalities.find((m) => m.id === state.selected);
   let html = `<h2>${escapeHtml(muni.name)}</h2>`;
 
-  if (!state.extraction) {
+  if (!state.extraction && muni.entry_count > 0 && !state.forceNewPaste) {
+    // A municipality can have several separate entries per batch (one
+    // paste per incident, e.g. Lucban's actual submission pattern) — show
+    // what's already there first rather than jumping straight into either
+    // a blank paste box or an arbitrary one of them.
+    html += renderEntryList(muni);
+  } else if (!state.extraction) {
     html += `
       <div class="paste-box">
         <label>Paste the raw report text
@@ -592,6 +622,7 @@ function renderEntryPanel() {
         <div id="ai-cooldown-notice"></div>
         <div class="actions">
           <button type="button" class="btn btn-primary" data-action="process">Process with AI</button>
+          ${muni.entry_count > 0 ? `<button type="button" class="btn" data-action="back-to-list">Back to List</button>` : ""}
         </div>
         <div id="process-error"></div>
       </div>
@@ -614,6 +645,7 @@ function renderEntryPanel() {
         ${reopened
           ? `<button type="button" class="btn" data-action="cancel-reopen">Cancel</button>`
           : `<button type="button" class="btn" data-action="discard">Discard &amp; Re-paste</button>`}
+        ${!reopened && muni.entry_count > 0 ? `<button type="button" class="btn" data-action="back-to-list">Back to List</button>` : ""}
       </div>
       <div id="save-message"></div>
     `;
@@ -734,16 +766,16 @@ function renderChecklist() {
   const container = document.getElementById("checklist");
   const locked = isBatchLocked();
   container.innerHTML = state.municipalities.map((m) => `
-    <button type="button" class="checklist-item ${m.has_entry ? "done" : ""} ${state.selected === m.id ? "selected" : ""} ${locked ? "locked" : ""}"
+    <button type="button" class="checklist-item ${m.entry_count > 0 ? "done" : ""} ${state.selected === m.id ? "selected" : ""} ${locked ? "locked" : ""}"
       data-muni="${m.id}" ${locked ? "disabled title=\"Batch is finalized — read-only\"" : ""}>
-      <span class="check-dot">${m.has_entry ? "✓" : ""}</span>
+      <span class="check-dot">${m.entry_count > 0 ? "✓" : ""}</span>
       <span class="check-name">${escapeHtml(m.name)}</span>
-      ${m.entry_status ? `<span class="check-status">${m.entry_status}</span>` : ""}
+      ${m.entry_count > 0 ? `<span class="check-status">${m.entry_count} report${m.entry_count === 1 ? "" : "s"}</span>` : ""}
     </button>
   `).join("");
 
   const progress = document.getElementById("checklist-progress");
-  const done = state.municipalities.filter((m) => m.has_entry).length;
+  const done = state.municipalities.filter((m) => m.entry_count > 0).length;
   progress.textContent = `${done} / ${state.municipalities.length} reporting`;
 }
 
@@ -759,7 +791,7 @@ function getRequestedBatchId() {
 function updateBatchStatusText() {
   const el = document.getElementById("batch-status");
   const b = state.batch;
-  const done = state.municipalities.filter((m) => m.has_entry).length;
+  const done = state.municipalities.filter((m) => m.entry_count > 0).length;
   const base = `${b.date} · ${b.shift} · ${b.status} · ${done}/${state.municipalities.length} reporting`;
 
   if (getRequestedBatchId()) {
@@ -772,24 +804,28 @@ function updateBatchStatusText() {
   if (finalizeProgress) finalizeProgress.textContent = `${done} / ${state.municipalities.length}`;
 }
 
-async function selectMunicipality(code) {
+// Selecting a municipality never auto-loads any specific entry anymore —
+// a municipality can have several, so there's no single "the" entry to
+// jump into. It either shows the paste box (zero entries) or the entry
+// list (one or more) — see renderEntryPanel/renderEntryList. Loading a
+// specific saved entry only happens from openEntryForEdit, when OPS
+// actually clicks one in that list.
+function selectMunicipality(code) {
   if (isBatchLocked()) return;
   state.selected = code;
   state.rawText = "";
   state.extraction = null;
   state.originalExtraction = null;
   state.reopenedEntryId = null;
+  state.forceNewPaste = false;
   renderChecklist();
+  renderEntryPanel();
+}
 
-  const muni = state.municipalities.find((m) => m.id === code);
-  if (!muni || !muni.has_entry || !muni.entry_id) {
-    renderEntryPanel();
-    return;
-  }
-
+async function openEntryForEdit(entryId) {
   document.getElementById("entry-panel").innerHTML = `<p class="entry-placeholder">Loading saved entry…</p>`;
   try {
-    const data = await apiFetch(API.entryDetail(muni.entry_id));
+    const data = await apiFetch(API.entryDetail(entryId));
     state.rawText = data.raw_text;
     state.originalExtraction = data.ai_output; // frozen audit-trail copy — passed straight through on next save
     state.reopenedEntryId = data.id;
@@ -813,11 +849,20 @@ async function selectMunicipality(code) {
   renderEntryPanel();
 }
 
+function handleAddAnotherReport() {
+  state.rawText = "";
+  state.extraction = null;
+  state.originalExtraction = null;
+  state.reopenedEntryId = null;
+  state.forceNewPaste = true;
+  renderEntryPanel();
+}
+
 // ── Finalize & Generate PDF ──────────────────────────────────────
 function renderFinalizePanel() {
   const panel = document.getElementById("finalize-panel");
   const b = state.batch;
-  const done = state.municipalities.filter((m) => m.has_entry).length;
+  const done = state.municipalities.filter((m) => m.entry_count > 0).length;
   const total = state.municipalities.length;
 
   synopsisCooldown.stop();
@@ -1256,13 +1301,24 @@ async function handleSave() {
         raw_text: state.rawText,
         ai_output: state.originalExtraction,
         edited_json: buildEditedJson(),
+        entry_id: state.reopenedEntryId,
       }),
     });
-    msgBox.innerHTML = `<div class="alert alert-success">Saved — entry status: ${result.entry.status}.</div>`;
+    // A fresh (not-yet-reopened) save just created a brand new entry —
+    // without recording its id here, clicking Save again on this same
+    // still-open form would omit entry_id and create ANOTHER duplicate
+    // entry rather than updating the one just saved (unlike before this
+    // feature, one entry per municipality made every save idempotent by
+    // construction; that's no longer true once multiple entries per
+    // municipality are allowed).
+    state.reopenedEntryId = result.entry.id;
     await loadCurrentBatch();
     renderChecklist();
     renderSummaryCards();
     updateBatchStatusText();
+    renderEntryPanel();
+    document.getElementById("save-message").innerHTML =
+      `<div class="alert alert-success">Saved — entry status: ${result.entry.status}.</div>`;
   } catch (err) {
     msgBox.innerHTML = renderSaveError(err);
   } finally {
@@ -1283,26 +1339,33 @@ function initEventListeners() {
   panel.addEventListener("change", handleFieldChange);
 
   panel.addEventListener("click", (e) => {
+    const entryItem = e.target.closest("[data-entry-id]");
+    if (entryItem) return openEntryForEdit(parseInt(entryItem.dataset.entryId, 10));
+
     const btn = e.target.closest("[data-action]");
     if (!btn) return;
     const action = btn.dataset.action;
 
     if (action === "process") return handleProcess();
     if (action === "save") return handleSave();
+    if (action === "add-report") return handleAddAnotherReport();
     if (action === "discard") {
+      // Fresh (not-yet-saved) paste — stays in "add another" mode if
+      // that's how OPS got here, so re-pasting doesn't dump them back
+      // out to the list they explicitly chose to leave.
       state.extraction = null;
       state.originalExtraction = null;
       renderEntryPanel();
       return;
     }
-    if (action === "cancel-reopen") {
-      // Re-opened entries have no paste box to fall back to (raw_text is
-      // read-only) — cancelling just deselects back to the placeholder.
-      state.selected = null;
+    if (action === "cancel-reopen" || action === "back-to-list") {
+      // Both land on the same place: this municipality's entry list (if
+      // it has any — it does, since only that state has these actions
+      // available) rather than deselecting the municipality entirely.
       state.extraction = null;
       state.originalExtraction = null;
       state.reopenedEntryId = null;
-      renderChecklist();
+      state.forceNewPaste = false;
       renderEntryPanel();
       return;
     }

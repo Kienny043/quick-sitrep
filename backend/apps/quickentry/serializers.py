@@ -104,6 +104,12 @@ class EntrySaveRequestSerializer(serializers.Serializer):
     municipality = serializers.ChoiceField(choices=MUNICIPALITY_CHOICES)
     raw_text = serializers.CharField(allow_blank=False)
     edited_json = serializers.JSONField()
+    # Present when editing a specific already-saved entry (the re-open
+    # flow — GET /api/entries/<id>/, edit, save back to that same row).
+    # Omitted/null for a fresh paste, which always creates a brand new
+    # ManualEntry now that a municipality can have more than one per
+    # batch — see views.save_entry.
+    entry_id = serializers.IntegerField(required=False, allow_null=True)
     # Not in the spec's literal request body, but needed to actually honor
     # ManualEntry.ai_output's contract ("raw AI extraction result, kept
     # as-is even after human edits, for audit comparison") — see the

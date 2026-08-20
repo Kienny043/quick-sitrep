@@ -191,8 +191,12 @@ class ManualEntry(models.Model):
     processed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
-        unique_together = ("batch", "municipality")
-        ordering = ["municipality"]
+        # No unique_together on (batch, municipality) — a municipality
+        # can submit several separate reports within one batch window
+        # (confirmed in real PDRRMO usage, e.g. Lucban pasting one report
+        # per incident rather than one combined report), so each paste
+        # becomes its own ManualEntry rather than overwriting the last.
+        ordering = ["municipality", "processed_at", "id"]
         verbose_name_plural = "Manual Entries"
 
     def __str__(self):

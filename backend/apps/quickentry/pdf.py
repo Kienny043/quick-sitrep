@@ -23,6 +23,13 @@ def _shift_label(shift):
 
 
 def _entries_with_incidents_prefetched(batch):
+    # municipality first (groups each muni's entries together for
+    # build_municipality_sections below), processed_at/id as a stable
+    # tiebreaker so a municipality's combined incident list has a
+    # deterministic, chronological order across however many separate
+    # entries it has — ManualEntry's own default ordering already does
+    # this, but an explicit .order_by() here overrides that rather than
+    # extending it, so it's spelled out in full.
     return (
         batch.entries.select_related()
         .prefetch_related(
@@ -32,7 +39,7 @@ def _entries_with_incidents_prefetched(batch):
             "water_incidents",
             "trauma_incidents",
         )
-        .order_by("municipality")
+        .order_by("municipality", "processed_at", "id")
     )
 
 
@@ -105,8 +112,16 @@ def compute_summary(batch):
 
 
 def build_municipality_sections(batch):
-    """Section II — only municipalities that reported at least one incident."""
-    sections = []
+    """
+    Section II — only municipalities that reported at least one incident.
+    A municipality can have several separate entries in one batch (one
+    paste per incident is how some LGUs actually submit — Lucban in
+    particular), so this combines every entry's incidents into that
+    municipality's ONE section rather than emitting a section per entry;
+    the reader shouldn't need to know or care how many separate pastes
+    it took to build up a municipality's incident list.
+    """
+    sections_by_muni = {}
     for entry in _entries_with_incidents_prefetched(batch):
         road_crashes = list(entry.road_crashes.all())
         medical = list(entry.medical_cases.all())
@@ -117,30 +132,52 @@ def build_municipality_sections(batch):
         if not (road_crashes or medical or fire or water or trauma):
             continue
 
-        sections.append(
+        section = sections_by_muni.setdefault(
+            entry.municipality,
             {
                 "municipality_name": entry.get_municipality_display(),
-                "road_crashes": road_crashes,
-                "medical_assistance": medical,
-                "fire_incidents": fire,
-                "water_incidents": water,
-                "trauma_emergencies": trauma,
-            }
+                "road_crashes": [],
+                "medical_assistance": [],
+                "fire_incidents": [],
+                "water_incidents": [],
+                "trauma_emergencies": [],
+            },
         )
-    return sections
+        section["road_crashes"].extend(road_crashes)
+        section["medical_assistance"].extend(medical)
+        section["fire_incidents"].extend(fire)
+        section["water_incidents"].extend(water)
+        section["trauma_emergencies"].extend(trauma)
+
+    return list(sections_by_muni.values())
 
 
 def build_lifelines_sections(batch):
-    """Section IV — only municipalities that actually reported lifelines."""
-    sections = []
-    for entry in batch.entries.select_related("lifelines").order_by("municipality"):
+    """
+    Section IV — only municipalities that actually reported lifelines.
+    Unlike incidents, lifelines is a status snapshot, not a list of
+    events, so when a municipality has more than one entry with
+    lifelines data (each ManualEntry can carry its own), there's no
+    sensible way to "combine" two different power/water/road statuses —
+    the most recently processed entry's lifelines wins rather than
+    showing several conflicting blocks for the same municipality.
+    Iterating in (municipality, processed_at, id) order and always
+    overwriting the dict's value for that key is what makes "last write
+    wins" land on the latest entry, while insertion order (first time a
+    municipality is seen) keeps the section list itself alphabetical.
+    """
+    latest_by_muni = {}
+    for entry in batch.entries.select_related("lifelines").order_by(
+        "municipality", "processed_at", "id"
+    ):
         lifelines = getattr(entry, "lifelines", None)
         if lifelines is None:
             continue
-        sections.append(
-            {"municipality_name": entry.get_municipality_display(), "lifelines": lifelines}
-        )
-    return sections
+        latest_by_muni[entry.municipality] = {
+            "municipality_name": entry.get_municipality_display(),
+            "lifelines": lifelines,
+        }
+    return list(latest_by_muni.values())
 
 
 def generate_batch_pdf(batch):

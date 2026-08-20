@@ -107,9 +107,14 @@ def batch_history(request):
     passed; a FINALIZED row links straight to the (always freshly
     regenerated) download endpoint.
     """
-    batches = ManualBatch.objects.annotate(entry_count=Count("entries")).order_by(
-        "-date", "-shift"
-    )
+    # Distinct municipalities, not raw entry rows — a municipality can now
+    # have several separate entries per batch, so Count("entries") alone
+    # would count reports rather than "how many municipalities reported"
+    # (and could exceed total_municipalities, which used to be impossible
+    # back when one entry per municipality was the most a batch could have).
+    batches = ManualBatch.objects.annotate(
+        municipality_count=Count("entries__municipality", distinct=True)
+    ).order_by("-date", "-shift")
     return render(
         request,
         "quickentry/history.html",
@@ -162,14 +167,34 @@ def current_batch(request):
             defaults={"status": ManualBatch.Status.DRAFT},
         )
 
-    existing = {e.municipality: e for e in batch.entries.all()}
+    # A municipality can have several separate entries per batch now (one
+    # paste per incident is how some LGUs — Lucban in particular — submit
+    # reports in practice), so this groups rather than assumes one entry
+    # each. batch.entries.all() is already ordered municipality-first via
+    # ManualEntry.Meta.ordering, so grouping here doesn't need its own
+    # extra query or re-sort.
+    entries_by_muni = {}
+    for e in batch.entries.all():
+        entries_by_muni.setdefault(e.municipality, []).append(e)
+
+    def _preview(raw_text):
+        snippet = " ".join(raw_text.split())
+        return snippet[:80] + ("…" if len(snippet) > 80 else "")
+
     municipalities = [
         {
             "id": code,
             "name": name,
-            "has_entry": code in existing,
-            "entry_id": existing[code].id if code in existing else None,
-            "entry_status": existing[code].status if code in existing else None,
+            "entry_count": len(entries_by_muni.get(code, [])),
+            "entries": [
+                {
+                    "id": e.id,
+                    "status": e.status,
+                    "processed_at": e.processed_at,
+                    "preview": _preview(e.raw_text),
+                }
+                for e in entries_by_muni.get(code, [])
+            ],
         }
         for code, name in MUNICIPALITY_CHOICES
     ]
@@ -276,22 +301,33 @@ def save_entry(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # raw_text is the accountability record — never silently overwritten
-    # once a municipality's entry exists for this batch.
-    existing_entry = ManualEntry.objects.filter(
-        batch=batch, municipality=data["municipality"]
-    ).first()
-    if existing_entry and existing_entry.raw_text != data["raw_text"]:
-        return Response(
-            {
-                "detail": (
-                    "raw_text cannot be changed after the first save for this "
-                    "municipality/batch — it's the accountability record. "
-                    "Only edited_json may be updated."
-                )
-            },
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+    # entry_id present = the re-open-for-edit flow (GET /api/entries/<id>/
+    # then save back to that exact row) — a municipality can have several
+    # separate entries per batch now, so there's no other way to know
+    # which one an edit belongs to. entry_id absent = always a brand new
+    # entry; see the create/update branch below.
+    entry_id = data.get("entry_id")
+    existing_entry = None
+    if entry_id:
+        existing_entry = get_object_or_404(ManualEntry, pk=entry_id, batch=batch)
+        if existing_entry.municipality != data["municipality"]:
+            return Response(
+                {"detail": "municipality does not match the entry being edited."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # raw_text is the accountability record — never silently
+        # overwritten once this entry exists.
+        if existing_entry.raw_text != data["raw_text"]:
+            return Response(
+                {
+                    "detail": (
+                        "raw_text cannot be changed after the first save for this "
+                        "entry — it's the accountability record. "
+                        "Only edited_json may be updated."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
     # ── Validate everything before touching the database ──────────────
     errors = {}
@@ -339,22 +375,28 @@ def save_entry(request):
         else ManualEntry.Status.PROCESSED
     )
 
-    with transaction.atomic():
-        entry, _created = ManualEntry.objects.update_or_create(
-            batch=batch,
-            municipality=data["municipality"],
-            defaults={
-                "raw_text": data["raw_text"],
-                "ai_output": ai_output,
-                "unmapped_notes": edited.get("unmapped_notes") or "",
-                "status": entry_status,
-                "processed_by": request.user,
-                "processed_at": timezone.now(),
-            },
-        )
+    entry_fields = {
+        "raw_text": data["raw_text"],
+        "ai_output": ai_output,
+        "unmapped_notes": edited.get("unmapped_notes") or "",
+        "status": entry_status,
+        "processed_by": request.user,
+        "processed_at": timezone.now(),
+    }
 
-        # edited_json is the full current state for this municipality's
-        # entry — replace rather than diff.
+    with transaction.atomic():
+        if existing_entry:
+            for field, value in entry_fields.items():
+                setattr(existing_entry, field, value)
+            existing_entry.save()
+            entry = existing_entry
+        else:
+            entry = ManualEntry.objects.create(
+                batch=batch, municipality=data["municipality"], **entry_fields
+            )
+
+        # edited_json is the full current state for this entry — replace
+        # rather than diff.
         entry.road_crashes.all().delete()
         entry.medical_cases.all().delete()
         entry.fire_incidents.all().delete()
