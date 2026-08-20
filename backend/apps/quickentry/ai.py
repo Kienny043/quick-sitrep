@@ -11,12 +11,15 @@ issue for this tool too.
 """
 
 import json
+import logging
 import re
 import threading
 import time
 
 import requests
 from django.conf import settings
+
+logger = logging.getLogger(__name__)
 
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 # NOTE: llama-3.3-70b-versatile (used by the main system's apps/ops/ai.py)
@@ -27,10 +30,14 @@ GROQ_MODEL = "openai/gpt-oss-120b"
 
 # Groq's free tier has a per-minute token budget (hit directly during
 # Step 3 testing — two calls back-to-back with this system prompt was
-# enough to trip it). Retry only on 429; anything else is a real error,
-# not a transient one, so it fails immediately.
-MAX_ATTEMPTS = 3
-INITIAL_BACKOFF_SECONDS = 2
+# enough to trip it). A 429 from that is NOT retried in-request anymore
+# (see RateLimitedError below) — these two constants now cover only a
+# genuine network blip (a dropped connection, a timeout), which usually
+# resolves in well under a second, so a short bounded retry is safe and
+# doesn't risk blocking the request for anything close to real rate-
+# limit durations.
+MAX_NETWORK_ATTEMPTS = 2
+NETWORK_RETRY_BACKOFF_SECONDS = 1
 
 # Hard cap on completion tokens per call — also doubles as the proactive
 # rate-limit safety margin below (it's the single largest, most variable
@@ -43,6 +50,35 @@ MAX_TOKENS = 4096
 
 class ExtractionError(Exception):
     """Raised when the Groq call fails or its response isn't valid JSON."""
+
+
+class RateLimitedError(ExtractionError):
+    """
+    Raised instead of sleeping when a call is rate-limited — either
+    proactively (a cooldown recorded from an earlier response is still
+    active) or reactively (Groq itself returns 429 on this call). Never
+    retried in-request either way; carries retry_after_seconds so the
+    caller (views.py) can turn this into a fast response telling the
+    client exactly how long to wait, rather than the request blocking on
+    a server-side sleep.
+
+    This matters beyond a nicety: Render's free tier runs
+    WEB_CONCURRENCY=1, so any in-request sleep — even the old capped 90s
+    one — makes the ENTIRE app unresponsive to every user for that
+    duration, not just whoever triggered it. A real incident during
+    testing showed this could run to ~56 minutes when Retry-After itself
+    was unusually large, since the old exponential-backoff retry loop
+    had no ceiling on that path at all. The frontend already has the UI
+    for this (createCooldownController(), /api/ai-status/) — it does
+    the actual waiting/retrying now, not the server.
+    """
+
+    def __init__(self, retry_after_seconds):
+        self.retry_after_seconds = max(0.0, retry_after_seconds)
+        super().__init__(
+            f"The AI service is rate-limited; retry in about "
+            f"{self.retry_after_seconds:.0f}s."
+        )
 
 
 SYSTEM_PROMPT = """You are extracting structured incident data from a Philippine LGU disaster
@@ -385,18 +421,25 @@ quotation marks around it."""
 # to process. Instead, every real Groq response tells us exactly how much
 # token budget is left and exactly when it recovers (x-ratelimit-remaining-
 # tokens / x-ratelimit-reset-tokens — confirmed against real responses,
-# not assumed). If that looks thin, the *next* call waits for the
-# reported recovery time before it even tries, instead of firing and
-# hoping. In-memory only — fine for this single-process dev tool.
+# not assumed). If that looks thin, the *next* call is refused up front
+# with RateLimitedError instead of firing and hoping — or, previously,
+# instead of sleeping it out in-request. In-memory only — fine for a
+# single Django process; Render's free tier runs exactly one
+# (WEB_CONCURRENCY=1), which is precisely why nothing here may block it.
 #
 # TOKEN_COOLDOWN_THRESHOLD = MAX_TOKENS is empirically validated in this
 # repo: a real call attempted with 3815 tokens remaining (< 4096) hit a
 # 429; one attempted with 7917 remaining (> 4096) succeeded.
 TOKEN_COOLDOWN_THRESHOLD = MAX_TOKENS
 
-# Cap how long we'll ever proactively wait, in case a header is ever
-# malformed and produces an unreasonable duration.
-MAX_COOLDOWN_WAIT_SECONDS = 90
+# Sanity ceiling on the STORED/reported cooldown — guards only against a
+# garbled header producing a nonsensical duration (confirmed by testing:
+# a malformed value can parse to e.g. 9999h). Not a "max time we'll
+# block for" anymore, since nothing blocks on this value now; it's
+# generous on purpose so a real, large Retry-After (observed once during
+# testing at roughly 56 minutes) is still reported honestly rather than
+# silently truncated into a number that would make OPS retry too early.
+MAX_REPORTED_COOLDOWN_SECONDS = 3600
 
 _rate_limit_lock = threading.Lock()
 _rate_limit_state = {"available_at": 0.0}  # epoch seconds; 0.0 = no known cooldown
@@ -429,10 +472,37 @@ def _parse_go_duration(text):
     return total if matched else None
 
 
+def _parse_retry_after_seconds(response):
+    """
+    Groq's Retry-After header on a 429 (confirmed present on real 429s: a
+    plain integer number of seconds). Returns None if absent/malformed so
+    the caller can fall back to whatever seconds_until_available() has
+    from x-ratelimit-reset-tokens instead.
+    """
+    retry_after = response.headers.get("Retry-After")
+    if not retry_after:
+        return None
+    try:
+        return float(retry_after)
+    except ValueError:
+        return None
+
+
 def _record_rate_limit(response):
-    """Called after every real Groq response (success or 429)."""
+    """
+    Called after every real Groq response (success or 429). Logs the raw
+    headers unconditionally first — this exact data was the one thing
+    missing when a real ~56-minute stuck request needed diagnosing, so it
+    is captured every time now, not just when something looks thin.
+    """
     remaining = response.headers.get("x-ratelimit-remaining-tokens")
     reset = response.headers.get("x-ratelimit-reset-tokens")
+    retry_after = response.headers.get("Retry-After")
+    logger.info(
+        "Groq response %s — x-ratelimit-remaining-tokens=%r x-ratelimit-reset-tokens=%r Retry-After=%r",
+        response.status_code, remaining, reset, retry_after,
+    )
+
     if remaining is None or reset is None:
         return
     try:
@@ -445,7 +515,7 @@ def _record_rate_limit(response):
     reset_seconds = _parse_go_duration(reset)
     if reset_seconds is None:
         return
-    reset_seconds = min(reset_seconds, MAX_COOLDOWN_WAIT_SECONDS)
+    reset_seconds = min(reset_seconds, MAX_REPORTED_COOLDOWN_SECONDS)
 
     with _rate_limit_lock:
         _rate_limit_state["available_at"] = time.time() + reset_seconds
@@ -453,70 +523,63 @@ def _record_rate_limit(response):
 
 def seconds_until_available():
     """
-    Public — used both by _wait_for_cooldown() below and by the
-    /api/ai-status/ view, so the frontend can show a countdown and
-    disable "Process with AI" *before* OPS clicks into a call that would
-    just block.
+    Public — checked at the top of _post_with_retry() (raises
+    RateLimitedError instead of calling out to Groq at all when this is
+    positive) and by the /api/ai-status/ view, so the frontend can show a
+    countdown and disable "Process with AI" *before* OPS clicks into a
+    call that would just get refused.
     """
     with _rate_limit_lock:
         available_at = _rate_limit_state["available_at"]
     return max(0.0, available_at - time.time())
 
 
-def _wait_for_cooldown():
-    remaining = seconds_until_available()
-    if remaining > 0:
-        time.sleep(remaining)
-
-
 def _post_with_retry(payload: dict, api_key: str) -> requests.Response:
     """
-    POST to Groq. Waits out any known cooldown first (see above), then
-    retries only on 429 — using the Retry-After header when Groq sends
-    one (confirmed present on real 429s: a plain integer number of
-    seconds), falling back to exponential backoff (2s, 4s —
-    MAX_ATTEMPTS total) when it doesn't. Any other failure (network
-    error, 4xx/5xx besides 429) is not transient and raises immediately
-    rather than burning retries on something that won't recover on its
-    own.
+    POST to Groq once (plus a short bounded retry for a genuine network
+    blip — see MAX_NETWORK_ATTEMPTS). Never sleeps out a rate limit
+    in-request:
+    - If a cooldown recorded from an earlier response is still active,
+      raises RateLimitedError immediately — Groq isn't even called.
+    - If Groq itself returns 429 on this call, records the rate-limit
+      state (same as any other response) and raises RateLimitedError
+      immediately — no retry loop, no backoff sleep. A single worker
+      process (Render free tier's WEB_CONCURRENCY=1) can't absorb
+      blocking on that; the caller turns this into a fast response and
+      the frontend's existing cooldown UI (createCooldownController(),
+      /api/ai-status/) handles the actual wait and retry.
+    Any other failure (a real 4xx/5xx besides 429, or a network error
+    that didn't recover within the short retry) is not transient and
+    raises immediately.
     """
+    cooldown = seconds_until_available()
+    if cooldown > 0:
+        raise RateLimitedError(cooldown)
+
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
-    _wait_for_cooldown()
-
-    delay = INITIAL_BACKOFF_SECONDS
-
-    for attempt in range(1, MAX_ATTEMPTS + 1):
+    delay = NETWORK_RETRY_BACKOFF_SECONDS
+    resp = None
+    for attempt in range(1, MAX_NETWORK_ATTEMPTS + 1):
         try:
             resp = requests.post(GROQ_CHAT_URL, headers=headers, json=payload, timeout=60)
+            break
         except requests.RequestException as exc:
-            raise ExtractionError(f"Groq request failed: {exc}") from exc
+            if attempt == MAX_NETWORK_ATTEMPTS:
+                raise ExtractionError(f"Groq request failed: {exc}") from exc
+            time.sleep(delay)
+            delay *= 2
 
-        _record_rate_limit(resp)
+    _record_rate_limit(resp)
 
-        if resp.status_code != 429:
-            resp.raise_for_status()
-            return resp
+    if resp.status_code == 429:
+        retry_after = _parse_retry_after_seconds(resp)
+        raise RateLimitedError(
+            retry_after if retry_after is not None else seconds_until_available()
+        )
 
-        if attempt == MAX_ATTEMPTS:
-            raise ExtractionError(
-                "The AI service is busy (rate-limited) and didn't recover after "
-                f"{MAX_ATTEMPTS} attempts. Wait a moment and try again."
-            )
-
-        retry_after = resp.headers.get("Retry-After")
-        wait_seconds = None
-        if retry_after:
-            try:
-                wait_seconds = float(retry_after)
-            except ValueError:
-                wait_seconds = None
-        if wait_seconds is None:
-            wait_seconds = delay
-        time.sleep(wait_seconds)
-        delay *= 2
-
-    raise ExtractionError("Groq request failed after retries.")  # unreachable
+    resp.raise_for_status()
+    return resp
 
 
 def extract_incident_data(municipality_name: str, raw_text: str) -> dict:

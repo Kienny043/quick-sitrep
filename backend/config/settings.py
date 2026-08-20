@@ -144,3 +144,26 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 # model (Step 12, /settings/ page) — see apps/quickentry/models.py.
 # Removed the hardcoded constants that used to live here so there's only
 # one source of truth.
+
+# Without this, apps.quickentry.ai's logger (used to log Groq's raw
+# rate-limit headers on every call — see ai._record_rate_limit) has no
+# handler: Python's logging propagates it to the root logger, which has
+# none configured, so records would silently vanish below WARNING. This
+# gap is exactly what made a real rate-limit incident hard to diagnose
+# (no captured header value to inspect afterward) — fixed by giving it
+# an explicit console handler, without touching Django's own default
+# logging setup for anything else (disable_existing_loggers stays False).
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {
+        "console": {"class": "logging.StreamHandler"},
+    },
+    "loggers": {
+        "apps.quickentry": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+    },
+}

@@ -22,6 +22,7 @@ from .ai import (
     generate_weather_summary,
     seconds_until_available,
     ExtractionError,
+    RateLimitedError,
 )
 from .models import (
     MUNICIPALITY_CHOICES,
@@ -223,6 +224,14 @@ def extract_entry(request):
     try:
         result = extract_incident_data(
             req.validated_data["municipality"], req.validated_data["raw_text"]
+        )
+    except RateLimitedError as exc:
+        # Fast refusal, not a blocking sleep — see ai.RateLimitedError.
+        # retry_after_seconds lets the frontend's cooldown UI take over
+        # instead of the request hanging on the server's one worker.
+        return Response(
+            {"detail": str(exc), "retry_after_seconds": exc.retry_after_seconds},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
     except ExtractionError as exc:
         # Upstream (Groq) failure or unparseable response — 502, not a 500,
@@ -441,6 +450,11 @@ def generate_synopsis_view(request, pk):
     batch = get_object_or_404(ManualBatch, pk=pk)
     try:
         synopsis = generate_synopsis(batch)
+    except RateLimitedError as exc:
+        return Response(
+            {"detail": str(exc), "retry_after_seconds": exc.retry_after_seconds},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
     except ExtractionError as exc:
         return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
     return Response({"synopsis": synopsis})
@@ -457,6 +471,11 @@ def generate_weather_view(request, pk):
     batch = get_object_or_404(ManualBatch, pk=pk)
     try:
         weather = generate_weather_summary(batch)
+    except RateLimitedError as exc:
+        return Response(
+            {"detail": str(exc), "retry_after_seconds": exc.retry_after_seconds},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
     except ExtractionError as exc:
         return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
     return Response({"weather_condition": weather})
