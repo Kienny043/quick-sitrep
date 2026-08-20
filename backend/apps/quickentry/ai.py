@@ -98,9 +98,16 @@ RULES:
   holds an aggregate count or a bare classification, note the specific
   detail in unmapped_notes even though the count/classification itself was
   confident. Never let a real detail exist only inside a coarse number.
+- weather_condition is ONLY for an explicit weather observation line
+  (e.g. "WEATHER CONDITION: Sunny skies") — never infer it from incident
+  context. A flooding or water rescue report does NOT imply "it must
+  have been raining"; that's a guess about the cause of an incident, not
+  a report of what was actually observed and stated. Leave it "" if the
+  report never states a weather observation.
 
 JSON SCHEMA:
 {
+  "weather_condition": "string (this entry's own stated weather observation, or empty string if none given)",
   "lifelines_status": {
     "power_supply": "OPERATIONAL | INTERRUPTED | UNDER_REPAIR",
     "power_supply_notes": "string",
@@ -187,6 +194,7 @@ RESPONDING UNIT: Team Bravo | AMBULANCE: Rescue 102 | DRIVER: J. Cruz | ERT: M. 
 
 OUTPUT:
 {
+  "weather_condition": "",
   "lifelines_status": {},
   "road_crashes": [{
     "datetime": "February 10, 2026 | 1400H",
@@ -216,6 +224,7 @@ ACTIONS TAKEN: Coordinated with BFP and PNP upon receiving the report; ensured s
 
 OUTPUT:
 {
+  "weather_condition": "",
   "lifelines_status": {},
   "road_crashes": [{
     "datetime": "February 11, 2026 | 0900H",
@@ -248,6 +257,7 @@ ACTIONS TAKEN: Fire suppressed, area secured, no casualties reported
 
 OUTPUT:
 {
+  "weather_condition": "",
   "lifelines_status": {},
   "road_crashes": [], "medical_assistance": [],
   "fire_incidents": [{
@@ -263,6 +273,7 @@ OUTPUT:
 }
 ---
 INPUT:
+WEATHER CONDITION: Partly cloudy, no rain at time of incident
 WHAT: Water Rescue
 WHEN: February 8, 2026 | 1015H
 WHERE: Brgy. Look, Sample Town (fishpond area)
@@ -275,6 +286,7 @@ ACTIONS TAKEN: Deployed rescue boat and flotation devices, retrieved both indivi
 
 OUTPUT:
 {
+  "weather_condition": "Partly cloudy, no rain at time of incident",
   "lifelines_status": {},
   "road_crashes": [], "medical_assistance": [], "fire_incidents": [],
   "water_incidents": [{
@@ -330,6 +342,42 @@ RULES:
 
 Return ONLY the synopsis text. No preamble, no commentary, no quotation
 marks around it."""
+
+
+# Same reasoning as SYNOPSIS_MAX_TOKENS — a short prose summary, not a
+# schema-shaped extraction.
+WEATHER_SUMMARY_MAX_TOKENS = 300
+
+WEATHER_SUMMARY_SYSTEM_PROMPT = """You are drafting a short synthesized weather summary for a Philippine LGU
+disaster response situational report (Quezon Province PDRRMO), covering
+one reporting period across Quezon Province. You will be given each
+municipality's own reported weather observation for this period —
+combine them into one short province-wide weather statement.
+
+This is a DRAFT for a human OPS officer to review and edit before it
+goes into an official report — write plainly and concisely, not
+floridly.
+
+RULES:
+- Summarize only what is actually stated in the observations you were
+  given. Never invent a condition, a municipality, or a detail (rainfall
+  amount, wind speed, a weather system name) that isn't present in the
+  input.
+- If municipalities report different conditions, say so plainly (e.g.
+  "mostly sunny across the province, with isolated rainshowers reported
+  in X") rather than picking one and ignoring the rest, and rather than
+  vaguely averaging them into something no municipality actually
+  reported.
+- If every municipality reports essentially the same condition, one
+  plain sentence covering all of them is enough — don't pad it out
+  restating the same thing per municipality.
+- Do not include forecasts, warnings, or recommendations — this is a
+  factual restatement of what was reported, nothing else.
+- Plain prose, one short sentence or two. No headers, no bullet points,
+  no markdown formatting.
+
+Return ONLY the weather summary text. No preamble, no commentary, no
+quotation marks around it."""
 
 
 # ── Proactive rate-limit cooldown ───────────────────────────────────
@@ -632,6 +680,72 @@ def generate_synopsis(batch) -> str:
     # Defensive: the model was told not to quote-wrap the result, but strip
     # a wrapping pair if it does anyway — matches extract_incident_data's
     # own defensive fence-stripping in spirit.
+    if len(content) >= 2 and content[0] == content[-1] == '"':
+        content = content[1:-1].strip()
+
+    return content
+
+
+# Returned directly, without a Groq call, when no entry in the batch has
+# a weather_condition set at all — same reasoning as
+# _EMPTY_BATCH_SYNOPSIS/_NO_INCIDENTS_SYNOPSIS above: there is exactly
+# one correct thing to say, so say it deterministically rather than
+# spending a call and a cooldown slot asking the model to say it for us.
+_NO_WEATHER_DATA = "No weather data available from municipality reports for this batch."
+
+
+def generate_weather_summary(batch) -> str:
+    """
+    Same shape as generate_synopsis(): drafts a short synthesized
+    province-wide weather paragraph from each entry's own
+    weather_condition (skipping entries that left it blank), never
+    touches the database, never called in JSON mode, reuses
+    _post_with_retry/the module's cooldown state rather than a second
+    rate-limit implementation.
+    """
+    conditions = []
+    seen = set()
+    # A municipality can have several entries per batch now — dedupe
+    # exact repeats (OPS often pastes the same current-weather line into
+    # every report within a shift) while still keeping genuinely
+    # different observations for the same municipality (e.g. sunny in
+    # the morning, rain by evening), which is real signal, not noise.
+    for entry in batch.entries.exclude(weather_condition="").order_by(
+        "municipality", "processed_at", "id"
+    ):
+        key = (entry.municipality, entry.weather_condition)
+        if key in seen:
+            continue
+        seen.add(key)
+        conditions.append(f"{entry.get_municipality_display()}: {entry.weather_condition}")
+
+    if not conditions:
+        return _NO_WEATHER_DATA
+
+    api_key = getattr(settings, "GROQ_API_KEY", "")
+    if not api_key:
+        raise ExtractionError("GROQ_API_KEY is not configured.")
+
+    user_content = "\n".join(conditions)
+
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [
+            {"role": "system", "content": WEATHER_SUMMARY_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+        "temperature": 0.2,
+        "max_tokens": WEATHER_SUMMARY_MAX_TOKENS,
+        "stream": False,
+    }
+
+    resp = _post_with_retry(payload, api_key)
+
+    try:
+        content = resp.json()["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, ValueError) as exc:
+        raise ExtractionError(f"Unexpected Groq response shape: {exc}") from exc
+
     if len(content) >= 2 and content[0] == content[-1] == '"':
         content = content[1:-1].strip()
 

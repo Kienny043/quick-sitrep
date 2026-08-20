@@ -178,6 +178,12 @@ class ManualEntry(models.Model):
     # frozen ai_output blob, so an OPS edit to it would silently vanish
     # the next time the entry is re-opened for editing (Step 8).
     unmapped_notes = models.TextField(blank=True, default="")
+    # Sibling to the incident data, not part of LifelinesStatus — weather
+    # is a distinct category from power/water/comms/road/sea status, and
+    # (like unmapped_notes) needs its own column for the same
+    # survives-re-open reason, plus a place for ai.generate_weather_summary
+    # to read from across the whole batch.
+    weather_condition = models.CharField(max_length=255, blank=True, default="")
     status = models.CharField(
         max_length=20, choices=Status.choices, default=Status.PENDING
     )

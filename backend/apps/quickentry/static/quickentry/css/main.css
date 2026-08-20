@@ -364,6 +364,9 @@ h1, h2, h3, h4 { margin: 0 0 0.4em; font-weight: 700; }
   border-radius: 6px; padding: 0.7rem; font-size: 0.8rem; max-height: 240px; overflow: auto;
 }
 
+/* ── Weather condition (per-entry) ───────────────────────── */
+.weather-field { margin-bottom: 1rem; }
+
 /* ── Unmapped notes ───────────────────────────────────── */
 .unmapped-box {
   border: 1px solid var(--border); border-radius: var(--radius);

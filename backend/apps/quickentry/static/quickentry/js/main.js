@@ -229,6 +229,7 @@ const API = {
   download: (id) => window.QUICKSITREP.endpoints.downloadTemplate.replace("999999", id),
   entryDetail: (id) => window.QUICKSITREP.endpoints.entryDetailTemplate.replace("999999", id),
   generateSynopsis: (id) => window.QUICKSITREP.endpoints.generateSynopsisTemplate.replace("999999", id),
+  generateWeather: (id) => window.QUICKSITREP.endpoints.generateWeatherTemplate.replace("999999", id),
   amend: (id) => window.QUICKSITREP.endpoints.amendTemplate.replace("999999", id),
 };
 
@@ -345,6 +346,7 @@ function normalizeExtraction(raw) {
   clone.lifelines_status = clone.lifelines_status && Object.keys(clone.lifelines_status).length
     ? clone.lifelines_status : {};
   clone.unmapped_notes = clone.unmapped_notes || "";
+  clone.weather_condition = clone.weather_condition || "";
 
   for (const key of Object.keys(INCIDENT_TYPES)) {
     clone[key] = (clone[key] || []).map((item) => normalizeIncidentItem(key, item));
@@ -538,6 +540,21 @@ function renderUnmappedNotes() {
   `;
 }
 
+// weather_condition is a sibling to unmapped_notes (a plain column on
+// ManualEntry, not part of any incident type or lifelines_status) — this
+// entry's own stated weather observation, if the report had one. Feeds
+// ai.generate_weather_summary() across the batch from the finalize panel.
+function renderWeatherCondition() {
+  const value = state.extraction.weather_condition || "";
+  return `
+    <label class="field weather-field">
+      <span class="field-label">Weather Condition (this report)</span>
+      <input type="text" data-section="weather_condition" data-field="weather_condition"
+        value="${escapeHtml(value)}" placeholder="e.g. Sunny skies — leave blank if not stated in the report">
+    </label>
+  `;
+}
+
 function renderEntryList(muni) {
   const items = muni.entries.map((e) => {
     const when = e.processed_at ? new Date(e.processed_at).toLocaleString() : "(unsaved)";
@@ -611,6 +628,7 @@ function renderEntryPanel() {
           <pre>${escapeHtml(state.rawText)}</pre>
         </details>
       </div>
+      ${renderWeatherCondition()}
       ${renderUnmappedNotes()}
       ${Object.keys(INCIDENT_TYPES).map(renderIncidentSection).join("")}
       ${renderLifelines()}
@@ -815,6 +833,7 @@ async function openEntryForEdit(entryId) {
       trauma_emergencies: data.trauma_emergencies,
       lifelines_status: data.lifelines_status,
       unmapped_notes: data.unmapped_notes,
+      weather_condition: data.weather_condition,
     });
   } catch (err) {
     document.getElementById("entry-panel").innerHTML =
@@ -841,6 +860,7 @@ function renderFinalizePanel() {
   const total = state.municipalities.length;
 
   synopsisCooldown.stop();
+  weatherCooldown.stop();
 
   if (b.status === "FINALIZED" && b.is_locked) {
     const when = b.finalized_at ? new Date(b.finalized_at).toLocaleString() : "";
@@ -884,9 +904,15 @@ function renderFinalizePanel() {
     </label>
     <div id="synopsis-cooldown-notice"></div>
     <div id="synopsis-error"></div>
-    <label class="finalize-field">Weather Conditions
+    <label class="finalize-field">
+      <span class="finalize-field-header">
+        <span>Weather Conditions</span>
+        <button type="button" id="generate-weather-btn" class="btn btn-small" data-action="generate-weather">Generate Draft</button>
+      </span>
       <textarea data-finalize-field="weather_conditions" rows="2" placeholder="e.g. Partly cloudy, isolated rain showers, no tropical cyclone within PAR…">${escapeHtml(state.finalizeForm.weather_conditions)}</textarea>
     </label>
+    <div id="weather-cooldown-notice"></div>
+    <div id="weather-error"></div>
     <label class="finalize-field">Actions Taken (EOC-level)
       <textarea data-finalize-field="actions_taken" rows="3" placeholder="Province-level coordination and actions…">${escapeHtml(state.finalizeForm.actions_taken)}</textarea>
     </label>
@@ -898,6 +924,9 @@ function renderFinalizePanel() {
 
   checkAiCooldown().then((secs) => {
     if (secs > 0) synopsisCooldown.start(secs);
+  });
+  checkAiCooldown().then((secs) => {
+    if (secs > 0) weatherCooldown.start(secs);
   });
 }
 
@@ -1045,6 +1074,40 @@ async function handleGenerateSynopsis() {
   }
 }
 
+async function handleGenerateWeather() {
+  const textarea = document.querySelector('[data-finalize-field="weather_conditions"]');
+  const errBox = document.getElementById("weather-error");
+  if (!textarea) return;
+  if (errBox) errBox.innerHTML = "";
+
+  if (textarea.value.trim() !== "") {
+    const confirmed = window.confirm("Replace your current weather conditions with an AI-generated draft?");
+    if (!confirmed) return;
+  }
+
+  const btn = document.getElementById("generate-weather-btn");
+  btn.disabled = true;
+  btn.textContent = "Generating…";
+
+  try {
+    const result = await apiFetch(API.generateWeather(state.batch.id), { method: "POST" });
+    textarea.value = result.weather_condition;
+    state.finalizeForm.weather_conditions = result.weather_condition;
+  } catch (err) {
+    if (errBox) errBox.innerHTML = `<div class="alert alert-error">${escapeHtml(err.message)}</div>`;
+  }
+
+  btn.textContent = "Generate Draft";
+  // Re-check rather than just re-enabling — the call just made may itself
+  // have pushed the shared Groq rate limit into a cooldown state.
+  const secs = await checkAiCooldown();
+  if (secs > 0) {
+    weatherCooldown.start(secs);
+  } else {
+    btn.disabled = false;
+  }
+}
+
 // ── Value reading for inputs ─────────────────────────────────────
 function readInputValue(el) {
   if (el.type === "checkbox") return el.checked;
@@ -1064,6 +1127,8 @@ function handleFieldChange(e) {
 
   if (section === "unmapped_notes") {
     state.extraction.unmapped_notes = value;
+  } else if (section === "weather_condition") {
+    state.extraction.weather_condition = value;
   } else if (section === "lifelines_status") {
     state.extraction.lifelines_status[field] = value;
   } else {
@@ -1103,11 +1168,12 @@ function handleRemoveVictim(section, idx, vIdx) {
 // Mirrors ai.py's own reactive cooldown: rather than letting OPS click
 // into a call that the backend already knows would just wait (or 429),
 // check /api/ai-status/ before showing an AI-triggering button as
-// clickable, and count down visibly if it isn't yet. Both "Process with
-// AI" and "Generate Draft" hit the same Groq account/rate limit, but they
-// live in separate, independently-rendered panels — each gets its own
-// controller instance (own timer, own button/notice) from this one
-// factory rather than a second copy-pasted countdown implementation.
+// clickable, and count down visibly if it isn't yet. "Process with AI",
+// synopsis's "Generate Draft", and weather's "Generate Draft" all hit
+// the same Groq account/rate limit, but they live in separate,
+// independently-rendered spots on the page — each of the three gets its
+// own controller instance (own timer, own button/notice) from this one
+// factory rather than three copy-pasted countdown implementations.
 function formatCountdown(seconds) {
   const s = Math.max(0, Math.ceil(seconds));
   const m = Math.floor(s / 60);
@@ -1180,6 +1246,10 @@ const processCooldown = createCooldownController(
 const synopsisCooldown = createCooldownController(
   () => document.getElementById("generate-synopsis-btn"),
   () => document.getElementById("synopsis-cooldown-notice")
+);
+const weatherCooldown = createCooldownController(
+  () => document.getElementById("generate-weather-btn"),
+  () => document.getElementById("weather-cooldown-notice")
 );
 
 // ── Process with AI ──────────────────────────────────────────────
@@ -1367,6 +1437,7 @@ function initEventListeners() {
   finalizePanel.addEventListener("click", (e) => {
     if (e.target.closest("#finalize-btn")) return handleFinalize();
     if (e.target.closest("#generate-synopsis-btn")) return handleGenerateSynopsis();
+    if (e.target.closest("#generate-weather-btn")) return handleGenerateWeather();
     if (e.target.closest("#amend-btn")) return renderAmendForm();
     if (e.target.closest("#amend-cancel-btn")) {
       document.getElementById("amend-form-container").innerHTML = "";

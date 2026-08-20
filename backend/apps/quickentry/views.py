@@ -19,6 +19,7 @@ from rest_framework.response import Response
 from .ai import (
     extract_incident_data,
     generate_synopsis,
+    generate_weather_summary,
     seconds_until_available,
     ExtractionError,
 )
@@ -270,6 +271,7 @@ def entry_detail(request, pk):
             "raw_text": entry.raw_text,
             "ai_output": entry.ai_output,
             "unmapped_notes": entry.unmapped_notes,
+            "weather_condition": entry.weather_condition,
             **{
                 key: INCIDENT_SERIALIZERS[key](qs, many=True).data
                 for key, qs in related_querysets.items()
@@ -379,6 +381,7 @@ def save_entry(request):
         "raw_text": data["raw_text"],
         "ai_output": ai_output,
         "unmapped_notes": edited.get("unmapped_notes") or "",
+        "weather_condition": edited.get("weather_condition") or "",
         "status": entry_status,
         "processed_by": request.user,
         "processed_at": timezone.now(),
@@ -441,6 +444,22 @@ def generate_synopsis_view(request, pk):
     except ExtractionError as exc:
         return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
     return Response({"synopsis": synopsis})
+
+
+# ── POST /api/batches/<id>/generate-weather/ ────────────────────────────
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def generate_weather_view(request, pk):
+    """
+    Same shape as generate_synopsis_view — draft-only, works on a DRAFT
+    batch, doesn't touch batch.weather_conditions itself.
+    """
+    batch = get_object_or_404(ManualBatch, pk=pk)
+    try:
+        weather = generate_weather_summary(batch)
+    except ExtractionError as exc:
+        return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+    return Response({"weather_condition": weather})
 
 
 # ── POST /api/batches/<id>/amend/ ───────────────────────────────────────
