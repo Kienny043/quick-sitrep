@@ -214,8 +214,12 @@ const state = {
   finalizeForm: { synopsis: "", weather_conditions: "", actions_taken: "" },
 };
 
-function isBatchFinalized() {
-  return !!(state.batch && state.batch.status === "FINALIZED");
+// Backed by the server's is_locked (ManualBatch.is_locked — status ==
+// FINALIZED and not amended more recently than the last finalize), not
+// a raw status check — an amended FINALIZED batch is open for editing
+// again even though its status is still "FINALIZED". See models.py.
+function isBatchLocked() {
+  return !!(state.batch && state.batch.is_locked);
 }
 
 // finalize/download URLs need a batch id DRF's url reverse can't give us
@@ -227,6 +231,7 @@ const API = {
   download: (id) => window.QUICKSITREP.endpoints.downloadTemplate.replace("999999", id),
   entryDetail: (id) => window.QUICKSITREP.endpoints.entryDetailTemplate.replace("999999", id),
   generateSynopsis: (id) => window.QUICKSITREP.endpoints.generateSynopsisTemplate.replace("999999", id),
+  amend: (id) => window.QUICKSITREP.endpoints.amendTemplate.replace("999999", id),
 };
 
 // ── Small helpers ───────────────────────────────────────────────────
@@ -560,11 +565,11 @@ function renderUnmappedNotes() {
 function renderEntryPanel() {
   const panel = document.getElementById("entry-panel");
 
-  if (isBatchFinalized()) {
+  if (isBatchLocked()) {
     panel.innerHTML = `
       <div class="alert alert-warning">
         <strong>This batch has been finalized.</strong> No further entries can be added or
-        edited — see the Finalize panel below for the download link.
+        edited — see the Finalize panel below for the download link, or to amend it.
       </div>
     `;
     return;
@@ -727,7 +732,7 @@ function renderSummaryCards() {
 // ── Checklist ────────────────────────────────────────────────────
 function renderChecklist() {
   const container = document.getElementById("checklist");
-  const locked = isBatchFinalized();
+  const locked = isBatchLocked();
   container.innerHTML = state.municipalities.map((m) => `
     <button type="button" class="checklist-item ${m.has_entry ? "done" : ""} ${state.selected === m.id ? "selected" : ""} ${locked ? "locked" : ""}"
       data-muni="${m.id}" ${locked ? "disabled title=\"Batch is finalized — read-only\"" : ""}>
@@ -768,7 +773,7 @@ function updateBatchStatusText() {
 }
 
 async function selectMunicipality(code) {
-  if (isBatchFinalized()) return;
+  if (isBatchLocked()) return;
   state.selected = code;
   state.rawText = "";
   state.extraction = null;
@@ -817,7 +822,7 @@ function renderFinalizePanel() {
 
   synopsisCooldown.stop();
 
-  if (b.status === "FINALIZED") {
+  if (b.status === "FINALIZED" && b.is_locked) {
     const when = b.finalized_at ? new Date(b.finalized_at).toLocaleString() : "";
     panel.innerHTML = `
       <h2>Finalize &amp; Generate PDF</h2>
@@ -825,13 +830,30 @@ function renderFinalizePanel() {
         This batch (${escapeHtml(b.date)} · ${escapeHtml(b.shift)}) was finalized${when ? " on " + escapeHtml(when) : ""}.
         No further entries can be added or edited for this batch.
       </div>
-      <a class="btn btn-primary" href="${API.download(b.id)}" target="_blank" rel="noopener">Download PDF</a>
+      <div class="actions">
+        <a class="btn btn-primary" href="${API.download(b.id)}" target="_blank" rel="noopener">Download PDF</a>
+        <button type="button" id="amend-btn" class="btn btn-warning">Amend This Batch</button>
+      </div>
+      <div id="amend-form-container"></div>
     `;
     return;
   }
 
+  // Not locked: either a normal DRAFT batch, or a FINALIZED batch that
+  // was amended more recently than it was last finalized (see
+  // ManualBatch.is_locked) — same editable form either way, with a
+  // banner added on top for the amended case.
+  const amendedBanner = (b.status === "FINALIZED" && b.amended_at)
+    ? `<div class="alert alert-warning">
+        This finalized batch was amended on ${escapeHtml(new Date(b.amended_at).toLocaleString())}
+        — you are editing the current version.
+        <a href="${API.download(b.id)}" target="_blank" rel="noopener">Download the current PDF</a>
+      </div>`
+    : "";
+
   panel.innerHTML = `
     <h2>Finalize &amp; Generate PDF</h2>
+    ${amendedBanner}
     <p class="finalize-progress"><span id="finalize-progress">${done} / ${total}</span> municipalities reporting</p>
     <label class="finalize-field">
       <span class="finalize-field-header">
@@ -857,6 +879,69 @@ function renderFinalizePanel() {
   checkAiCooldown().then((secs) => {
     if (secs > 0) synopsisCooldown.start(secs);
   });
+}
+
+// ── Amend a finalized batch ────────────────────────────────────────
+// A real text input for the reason, not window.prompt() — the reason is
+// substantive content (it ends up permanently on the PDF), not a yes/no
+// confirmation, so it gets the same inline-form treatment as every other
+// editable field in this app rather than a browser dialog.
+function renderAmendForm() {
+  const container = document.getElementById("amend-form-container");
+  if (!container) return;
+  container.innerHTML = `
+    <div class="amend-form">
+      <label class="finalize-field">Amendment Reason
+        <textarea id="amend-reason-input" rows="2" placeholder="Why is this finalized batch being amended?"></textarea>
+      </label>
+      <div class="actions">
+        <button type="button" id="amend-submit-btn" class="btn btn-primary">Submit Amendment</button>
+        <button type="button" id="amend-cancel-btn" class="btn">Cancel</button>
+      </div>
+      <div id="amend-error"></div>
+    </div>
+  `;
+  document.getElementById("amend-reason-input").focus();
+}
+
+async function handleAmendSubmit() {
+  const textarea = document.getElementById("amend-reason-input");
+  const errBox = document.getElementById("amend-error");
+  const reason = textarea.value.trim();
+  errBox.innerHTML = "";
+
+  if (!reason) {
+    errBox.innerHTML = `<div class="alert alert-error">Enter a reason for this amendment.</div>`;
+    return;
+  }
+
+  const submitBtn = document.getElementById("amend-submit-btn");
+  submitBtn.disabled = true;
+  submitBtn.textContent = "Submitting…";
+
+  try {
+    const result = await apiFetch(API.amend(state.batch.id), {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    });
+    state.batch = result;
+    // The batch's synopsis/weather/actions are whatever was frozen at
+    // its last finalize — seed the now-reopened form from that instead
+    // of leaving it blank (see loadCurrentBatch's own seeding for why).
+    state.finalizeForm = {
+      synopsis: result.synopsis || "",
+      weather_conditions: result.weather_conditions || "",
+      actions_taken: result.actions_taken || "",
+    };
+    renderChecklist();
+    renderEntryPanel();
+    renderFinalizePanel();
+    updateBatchStatusText();
+  } catch (err) {
+    errBox.innerHTML = `<div class="alert alert-error">${escapeHtml(err.message)}</div>`;
+    submitBtn.disabled = false;
+    submitBtn.textContent = "Submit Amendment";
+  }
 }
 
 function handleFinalizeFieldChange(e) {
@@ -1244,6 +1329,12 @@ function initEventListeners() {
   finalizePanel.addEventListener("click", (e) => {
     if (e.target.closest("#finalize-btn")) return handleFinalize();
     if (e.target.closest("#generate-synopsis-btn")) return handleGenerateSynopsis();
+    if (e.target.closest("#amend-btn")) return renderAmendForm();
+    if (e.target.closest("#amend-cancel-btn")) {
+      document.getElementById("amend-form-container").innerHTML = "";
+      return;
+    }
+    if (e.target.closest("#amend-submit-btn")) return handleAmendSubmit();
   });
 }
 
@@ -1256,6 +1347,15 @@ async function loadCurrentBatch() {
   state.batch = data.batch;
   state.municipalities = data.municipalities;
   state.summary = data.summary;
+  // Seeds the finalize form from whatever's actually saved on the batch
+  // (blank for a fresh DRAFT batch, same as before; the batch's real
+  // frozen text for an amended/reopened FINALIZED one) rather than
+  // always starting blank.
+  state.finalizeForm = {
+    synopsis: data.batch.synopsis || "",
+    weather_conditions: data.batch.weather_conditions || "",
+    actions_taken: data.batch.actions_taken || "",
+  };
 }
 
 async function init() {

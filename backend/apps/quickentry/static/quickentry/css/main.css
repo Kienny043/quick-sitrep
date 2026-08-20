@@ -80,6 +80,8 @@ h1, h2, h3, h4 { margin: 0 0 0.4em; font-weight: 700; }
 .btn-primary:hover { background: var(--navy-dark); }
 .btn-primary:disabled { background: #9aa4bd; border-color: #9aa4bd; cursor: not-allowed; }
 .btn-danger { color: var(--red); }
+.btn-warning { border-color: #b45309; color: #b45309; }
+.btn-warning:hover { background: #fffbeb; }
 .btn-small { padding: 0.3rem 0.6rem; font-size: 0.78rem; }
 .btn-block { width: 100%; }
 .link-button {
@@ -264,7 +266,9 @@ h1, h2, h3, h4 { margin: 0 0 0.4em; font-weight: 700; }
 }
 .history-status--draft { background: var(--color-pd-gray); color: var(--color-pd-text-secondary); }
 .history-status--finalized { background: rgba(31, 175, 56, 0.12); color: var(--color-pd-green); }
+.history-status--amended { background: rgba(180, 83, 9, 0.12); color: #b45309; margin-left: 0.35rem; }
 .history-action { text-align: right; }
+.history-action .btn + .btn { margin-left: 0.4rem; }
 .history-empty { text-align: center; color: var(--color-pd-text-secondary); padding: 1.5rem !important; }
 
 .layout {
@@ -407,3 +411,5 @@ h1, h2, h3, h4 { margin: 0 0 0.4em; font-weight: 700; }
 }
 .finalize-panel .actions { margin-top: 0.4rem; }
 .finalize-panel .alert-success { margin-bottom: 0.8rem; }
+.finalize-panel .alert-warning { margin-bottom: 0.8rem; }
+.amend-form { margin-top: 0.8rem; padding-top: 0.8rem; border-top: 1px solid var(--border); }

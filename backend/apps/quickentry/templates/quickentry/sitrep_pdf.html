@@ -17,6 +17,12 @@
   .division { font-size: 12px; font-weight: 700; letter-spacing: 1px; margin: 0; }
   .tool-tag { font-size: 9px; color: #666; margin-top: 4px; }
 
+  .amendment-note {
+    margin: 0 0 14px; padding: 6px 10px; border: 1px solid #b45309;
+    background: #fffbeb; font-size: 10.5px; color: #78350f;
+  }
+  .amendment-note strong { text-transform: uppercase; }
+
   .info-bar { margin-bottom: 14px; }
   .row { margin-bottom: 2px; }
   .label { font-weight: 700; display: inline-block; width: 70px; text-transform: uppercase; }
@@ -78,6 +84,12 @@
   <p class="division">OPERATIONS AND WARNING DIVISION</p>
   <p class="tool-tag">Compiled via Quick SitRep (bridge tool)</p>
 </div>
+
+{% if batch.amended_at %}
+  <div class="amendment-note">
+    <strong>Amended:</strong> This report was amended on {{ batch.amended_at|date:"d F Y, H:i" }}. Reason: {{ batch.amendment_reason }}
+  </div>
+{% endif %}
 
 <div class="info-bar">
   <div class="row"><span class="label">FOR</span><span>THE CHAIRPERSON, PDRRMC</span></div>

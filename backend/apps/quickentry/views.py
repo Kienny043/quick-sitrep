@@ -36,6 +36,7 @@ from .serializers import (
     ExtractRequestSerializer,
     EntrySaveRequestSerializer,
     FinalizeBatchRequestSerializer,
+    AmendBatchRequestSerializer,
     LifelinesStatusSerializer,
     INCIDENT_SERIALIZERS,
     get_incident_schema,
@@ -262,7 +263,7 @@ def save_entry(request):
     data = envelope.validated_data
 
     batch = get_object_or_404(ManualBatch, pk=data["batch_id"])
-    if batch.status == ManualBatch.Status.FINALIZED:
+    if batch.is_locked:
         return Response(
             {"detail": "This batch has already been finalized and is locked."},
             status=status.HTTP_400_BAD_REQUEST,
@@ -400,6 +401,37 @@ def generate_synopsis_view(request, pk):
     return Response({"synopsis": synopsis})
 
 
+# ── POST /api/batches/<id>/amend/ ───────────────────────────────────────
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def amend_batch(request, pk):
+    """
+    Records an amendment and — via ManualBatch.is_locked comparing
+    amended_at against finalized_at — reopens entries/finalize-panel
+    fields for editing, without ever moving status away from FINALIZED.
+    Only the latest amendment is tracked (amended_at/amendment_reason are
+    overwritten, not appended); re-amending an already-open batch just
+    updates the reason. finalize_batch (below) re-locks it the normal
+    way once OPS is done editing and re-finalizes.
+    """
+    batch = get_object_or_404(ManualBatch, pk=pk)
+    if batch.status != ManualBatch.Status.FINALIZED:
+        return Response(
+            {"detail": "Only a finalized batch can be amended."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    body = AmendBatchRequestSerializer(data=request.data)
+    body.is_valid(raise_exception=True)
+
+    batch.amended_at = timezone.now()
+    batch.amended_by = request.user
+    batch.amendment_reason = body.validated_data["reason"]
+    batch.save()
+
+    return Response(ManualBatchSerializer(batch).data)
+
+
 # ── POST /api/batches/<id>/finalize/ ───────────────────────────────────
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -410,9 +442,17 @@ def finalize_batch(request, pk):
     never regenerates a PDF here. Editing the settings page afterward
     must never retroactively change what an already-finalized batch's
     PDF says; freezing at this exact moment is what guarantees that.
+
+    is_locked (not a raw status check) is what gates this — the same
+    call handles both a fresh DRAFT batch's first finalize and an
+    amended batch's re-finalize, since bumping finalized_at to now()
+    here is exactly what makes is_locked true again afterward (see the
+    property's own docstring). amended_at/amendment_reason are left
+    untouched either way — the PDF's amendment note is a permanent
+    record, not cleared by re-finalizing.
     """
     batch = get_object_or_404(ManualBatch, pk=pk)
-    if batch.status == ManualBatch.Status.FINALIZED:
+    if batch.is_locked:
         return Response(
             {"detail": "This batch is already finalized."},
             status=status.HTTP_400_BAD_REQUEST,

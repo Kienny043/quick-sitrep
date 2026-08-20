@@ -55,11 +55,23 @@ class NullToBlankMixin:
 # ═══════════════════════════════════════════════════════════
 
 class ManualBatchSerializer(serializers.ModelSerializer):
+    # Computed from the model's is_locked property rather than left for
+    # the frontend to re-derive from status/amended_at/finalized_at —
+    # same "one implementation, not two that could drift" reasoning as
+    # compute_summary()/get_incident_schema() elsewhere in this app.
+    is_locked = serializers.BooleanField(read_only=True)
+
     class Meta:
         model = ManualBatch
         fields = [
-            "id", "date", "shift", "status",
+            "id", "date", "shift", "status", "is_locked",
             "finalized_at", "finalized_by",
+            "amended_at", "amended_by", "amendment_reason",
+            # Included so an amended (reopened) batch's finalize form can
+            # be pre-filled from what was actually frozen last time,
+            # rather than showing blank textareas over real saved text —
+            # previously unneeded since a DRAFT batch never has these set.
+            "synopsis", "weather_conditions", "actions_taken",
         ]
         read_only_fields = fields
 
@@ -104,6 +116,10 @@ class FinalizeBatchRequestSerializer(serializers.Serializer):
     synopsis = serializers.CharField(required=False, allow_blank=True, default="")
     weather_conditions = serializers.CharField(required=False, allow_blank=True, default="")
     actions_taken = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class AmendBatchRequestSerializer(serializers.Serializer):
+    reason = serializers.CharField(allow_blank=False, trim_whitespace=True)
 
 
 # ═══════════════════════════════════════════════════════════

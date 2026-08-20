@@ -45,12 +45,14 @@
               <td>{{ batch.get_shift_display }}</td>
               <td>
                 <span class="history-status history-status--{{ batch.status|lower }}">{{ batch.status }}</span>
+                {% if batch.amended_at %}<span class="history-status history-status--amended">Amended</span>{% endif %}
               </td>
               <td>{{ batch.entry_count }} / {{ total_municipalities }}</td>
               <td class="history-action">
-                {% if batch.status == "DRAFT" %}
+                {% if batch.status == "DRAFT" or not batch.is_locked %}
                   <a href="{% url 'quickentry-main' %}?batch_id={{ batch.id }}" class="btn btn-small btn-primary">Open</a>
-                {% else %}
+                {% endif %}
+                {% if batch.status == "FINALIZED" %}
                   <a href="{% url 'quickentry-batch-download' pk=batch.id %}" class="btn btn-small">Download PDF</a>
                 {% endif %}
               </td>

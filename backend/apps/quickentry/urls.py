@@ -13,6 +13,7 @@ urlpatterns = [
         views.generate_synopsis_view,
         name="quickentry-batch-generate-synopsis",
     ),
+    path("batches/<int:pk>/amend/", views.amend_batch, name="quickentry-batch-amend"),
     path("batches/<int:pk>/finalize/", views.finalize_batch, name="quickentry-batch-finalize"),
     path("batches/<int:pk>/download/", views.download_batch, name="quickentry-batch-download"),
 ]

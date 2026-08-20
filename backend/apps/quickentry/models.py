@@ -106,6 +106,23 @@ class ManualBatch(models.Model):
     approved_by = models.CharField(max_length=255, blank=True, default="")
     approved_by_title = models.CharField(max_length=255, blank=True, default="")
 
+    # Amendment — only the LATEST amendment is tracked, not a full history
+    # (deliberately not a separate append-only log model; see the Amend
+    # flow's design note). Once set, these stay set permanently — even
+    # after a re-finalize re-locks the batch (see is_locked below), the
+    # PDF keeps showing "this report was amended" as a permanent audit
+    # marker, same spirit as raw_text/ai_output being frozen elsewhere in
+    # this app for accountability.
+    amended_at = models.DateTimeField(null=True, blank=True)
+    amended_by = models.ForeignKey(
+        AUTH_USER,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="amended_batches",
+    )
+    amendment_reason = models.TextField(null=True, blank=True)
+
     class Meta:
         unique_together = ("date", "shift")
         ordering = ["-date", "-shift"]
@@ -114,6 +131,27 @@ class ManualBatch(models.Model):
 
     def __str__(self):
         return f"Batch {self.date} {self.shift} [{self.status}]"
+
+    @property
+    def is_locked(self):
+        """
+        The single source of truth for "can this batch's entries/finalize
+        fields be edited right now" — used by save_entry and
+        finalize_batch instead of a blanket status == FINALIZED check.
+
+        A FINALIZED batch is locked UNLESS it was amended more recently
+        than it was last finalized — comparing timestamps rather than
+        clearing amended_at on re-finalize means: (a) amending reopens
+        editing without needing a second "is this currently open" flag,
+        and (b) re-finalizing naturally re-locks it again (finalized_at
+        moves forward past amended_at) while still leaving the permanent
+        amended_at/amendment_reason record in place for the PDF note.
+        """
+        if self.status != self.Status.FINALIZED:
+            return False
+        if self.amended_at and self.amended_at > self.finalized_at:
+            return False
+        return True
 
 
 class ManualEntry(models.Model):
