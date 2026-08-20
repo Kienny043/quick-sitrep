@@ -1042,28 +1042,62 @@ async function handleFinalize() {
 
 async function handleGenerateSynopsis() {
   const textarea = document.querySelector('[data-finalize-field="synopsis"]');
-  const errBox = document.getElementById("synopsis-error");
   if (!textarea) return;
-  if (errBox) errBox.innerHTML = "";
 
   if (textarea.value.trim() !== "") {
     const confirmed = window.confirm("Replace your current synopsis with an AI-generated draft?");
     if (!confirmed) return;
   }
 
+  await attemptGenerateSynopsis(textarea, /* allowAutoRetry */ true);
+}
+
+// Split out from handleGenerateSynopsis so a 503 (rate-limited — see
+// ai.RateLimitedError) can trigger exactly one automatic retry once its
+// cooldown elapses, without re-running the confirm() dialog a second
+// time. allowAutoRetry=false on the retry call itself, so a second 503
+// in a row just shows the new cooldown normally instead of chaining
+// another automatic attempt.
+async function attemptGenerateSynopsis(textarea, allowAutoRetry) {
+  const errBox = document.getElementById("synopsis-error");
+  const notice = document.getElementById("synopsis-cooldown-notice");
+  if (errBox) errBox.innerHTML = "";
+  if (notice) notice.innerHTML = "";
+
   const btn = document.getElementById("generate-synopsis-btn");
   btn.disabled = true;
   btn.textContent = "Generating…";
 
+  let rateLimitedSeconds = null;
   try {
     const result = await apiFetch(API.generateSynopsis(state.batch.id), { method: "POST" });
     textarea.value = result.synopsis;
     state.finalizeForm.synopsis = result.synopsis;
   } catch (err) {
-    if (errBox) errBox.innerHTML = `<div class="alert alert-error">${escapeHtml(err.message)}</div>`;
+    if (err.status === 503 && err.data && typeof err.data.retry_after_seconds === "number") {
+      rateLimitedSeconds = err.data.retry_after_seconds;
+    } else if (errBox) {
+      errBox.innerHTML = `<div class="alert alert-error">${escapeHtml(err.message)}</div>`;
+    }
   }
 
   btn.textContent = "Generate Draft";
+
+  if (rateLimitedSeconds !== null) {
+    // Rate-limited, not a real failure — the server fails fast on
+    // purpose now instead of blocking its one worker thread. Absorb
+    // this into the existing cooldown UI rather than showing an error:
+    // show the countdown, then retry automatically once it elapses, so
+    // from OPS's perspective this reads as "took a bit" rather than
+    // "failed".
+    if (allowAutoRetry) {
+      synopsisCooldown.start(rateLimitedSeconds, () => attemptGenerateSynopsis(textarea, false));
+    } else {
+      synopsisCooldown.start(rateLimitedSeconds);
+    }
+    return;
+  }
+
   // Re-check rather than just re-enabling — the call just made may itself
   // have pushed the shared Groq rate limit into a cooldown state.
   const secs = await checkAiCooldown();
@@ -1076,30 +1110,51 @@ async function handleGenerateSynopsis() {
 
 async function handleGenerateWeather() {
   const textarea = document.querySelector('[data-finalize-field="weather_conditions"]');
-  const errBox = document.getElementById("weather-error");
   if (!textarea) return;
-  if (errBox) errBox.innerHTML = "";
 
   if (textarea.value.trim() !== "") {
     const confirmed = window.confirm("Replace your current weather conditions with an AI-generated draft?");
     if (!confirmed) return;
   }
 
+  await attemptGenerateWeather(textarea, /* allowAutoRetry */ true);
+}
+
+// Same shape as attemptGenerateSynopsis — see its comment.
+async function attemptGenerateWeather(textarea, allowAutoRetry) {
+  const errBox = document.getElementById("weather-error");
+  const notice = document.getElementById("weather-cooldown-notice");
+  if (errBox) errBox.innerHTML = "";
+  if (notice) notice.innerHTML = "";
+
   const btn = document.getElementById("generate-weather-btn");
   btn.disabled = true;
   btn.textContent = "Generating…";
 
+  let rateLimitedSeconds = null;
   try {
     const result = await apiFetch(API.generateWeather(state.batch.id), { method: "POST" });
     textarea.value = result.weather_condition;
     state.finalizeForm.weather_conditions = result.weather_condition;
   } catch (err) {
-    if (errBox) errBox.innerHTML = `<div class="alert alert-error">${escapeHtml(err.message)}</div>`;
+    if (err.status === 503 && err.data && typeof err.data.retry_after_seconds === "number") {
+      rateLimitedSeconds = err.data.retry_after_seconds;
+    } else if (errBox) {
+      errBox.innerHTML = `<div class="alert alert-error">${escapeHtml(err.message)}</div>`;
+    }
   }
 
   btn.textContent = "Generate Draft";
-  // Re-check rather than just re-enabling — the call just made may itself
-  // have pushed the shared Groq rate limit into a cooldown state.
+
+  if (rateLimitedSeconds !== null) {
+    if (allowAutoRetry) {
+      weatherCooldown.start(rateLimitedSeconds, () => attemptGenerateWeather(textarea, false));
+    } else {
+      weatherCooldown.start(rateLimitedSeconds);
+    }
+    return;
+  }
+
   const secs = await checkAiCooldown();
   if (secs > 0) {
     weatherCooldown.start(secs);
@@ -1200,7 +1255,15 @@ function createCooldownController(getBtn, getNotice) {
     }
   }
 
-  function start(initialSeconds) {
+  // onComplete: optional. Called instead of the default "just re-enable
+  // the button" behavior once the countdown genuinely elapses (confirmed
+  // by re-checking the server, not just the local clock). Used for the
+  // 503-triggered countdowns (Process with AI, both Generate Draft
+  // buttons) to automatically retry the request that got rate-limited,
+  // exactly once — the proactive, pre-click countdown (started after
+  // every render from /api/ai-status/) never passes this, since nothing
+  // was actually attempted yet for it to retry.
+  function start(initialSeconds, onComplete) {
     stop();
     let remaining = initialSeconds;
 
@@ -1217,7 +1280,9 @@ function createCooldownController(getBtn, getNotice) {
         // clock — it was seeded from a real value, but only once.
         checkAiCooldown().then((secs) => {
           if (secs > 0) {
-            start(secs);
+            start(secs, onComplete);
+          } else if (onComplete) {
+            onComplete();
           } else {
             const b = getBtn();
             const n = getNotice();
@@ -1264,17 +1329,33 @@ async function handleProcess() {
     return;
   }
 
+  await attemptProcess(rawText, /* allowAutoRetry */ true);
+}
+
+// Split out from handleProcess so a 503 (rate-limited — see
+// ai.RateLimitedError; the server fails fast now instead of blocking its
+// one worker thread on a Groq rate limit) can trigger exactly one
+// automatic retry once its cooldown elapses. allowAutoRetry=false on the
+// retry call itself, so a second 503 in a row just shows the new
+// cooldown normally (button re-enables when it clears) instead of
+// chaining another automatic attempt — OPS clicks again from there.
+async function attemptProcess(rawText, allowAutoRetry) {
+  const errBox = document.getElementById("process-error");
+  const notice = document.getElementById("ai-cooldown-notice");
+  errBox.innerHTML = "";
+  if (notice) notice.innerHTML = "";
+
   const btn = document.querySelector('[data-action="process"]');
   btn.disabled = true;
   btn.textContent = "Processing with AI…";
 
-  // extract_incident_data() retries silently server-side on Groq 429s
-  // (2s, then 4s backoff — ai.py). A single request taking noticeably
-  // longer than a normal extraction is the only signal we have that a
-  // retry is happening, so use that as a proxy to keep OPS informed
-  // instead of just staring at a static "Processing…" for 5+ seconds.
+  // A single request taking noticeably longer than a normal extraction
+  // is the only signal we have that Groq itself is just slow right now
+  // (the server no longer retries a 429 in-request — see
+  // ai.RateLimitedError — so this is ordinary latency, not a hidden
+  // retry loop).
   const busyTimer = setTimeout(() => {
-    btn.textContent = "AI is busy, retrying…";
+    btn.textContent = "This is taking a while…";
   }, 3000);
 
   try {
@@ -1287,9 +1368,22 @@ async function handleProcess() {
     state.extraction = normalizeExtraction(result);
     renderEntryPanel();
   } catch (err) {
-    errBox.innerHTML = `<div class="alert alert-error">${escapeHtml(err.message)}</div>`;
-    btn.disabled = false;
-    btn.textContent = "Process with AI";
+    if (err.status === 503 && err.data && typeof err.data.retry_after_seconds === "number") {
+      // Rate-limited, not a real failure — absorb it into the existing
+      // cooldown UI instead of showing an error: show the countdown,
+      // then retry automatically once it elapses, so from OPS's
+      // perspective this reads as "took a bit" rather than "failed".
+      btn.textContent = "Process with AI";
+      if (allowAutoRetry) {
+        processCooldown.start(err.data.retry_after_seconds, () => attemptProcess(rawText, false));
+      } else {
+        processCooldown.start(err.data.retry_after_seconds);
+      }
+    } else {
+      errBox.innerHTML = `<div class="alert alert-error">${escapeHtml(err.message)}</div>`;
+      btn.disabled = false;
+      btn.textContent = "Process with AI";
+    }
   } finally {
     clearTimeout(busyTimer);
   }
