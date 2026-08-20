@@ -65,6 +65,22 @@ RULES:
 - Empty arrays are valid and common — "no incidents" is a normal result.
 - Never guess a value you're not confident about. Prefer null/omission and
   put the uncertain fragment into unmapped_notes instead.
+- "No matching schema field" is NOT the same as "nothing to report."
+  These are two separate reasons content can fail to land in a
+  structured field, and BOTH must still put the content in
+  unmapped_notes:
+    (a) you're uncertain what a fragment means, or
+    (b) you're fully confident what it means, but there is genuinely no
+        field for it (e.g. a line about land-travel schedules when
+        there's a sea_travel field but no land-travel field — don't
+        force it into sea_travel just because it's the closest-sounding
+        field, but don't silently drop it either).
+  Only skip a line producing NOTHING at all — not even an unmapped_notes
+  mention — when it is genuinely uninformative boilerplate that carries
+  no situational content: contact numbers, hotline lines, signature
+  blocks, letterhead/office titles. When you're unsure whether something
+  clears that bar, note it — a silently dropped real detail is a worse
+  failure than an over-cautious note.
 - Never compute summary counts or totals — that's handled downstream.
 - For fire incidents: if there's an "IPO" line, it usually contains a
   location/incident description, NOT a time — map that text into
