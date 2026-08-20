@@ -441,8 +441,12 @@ TOKEN_COOLDOWN_THRESHOLD = MAX_TOKENS
 # silently truncated into a number that would make OPS retry too early.
 MAX_REPORTED_COOLDOWN_SECONDS = 3600
 
+# Keyed by "primary"/"fallback" — cooldown tracking is per-key, not
+# global, since the two keys belong to separate Groq accounts and can be
+# rate-limited independently. A key with no entry (or an expired one) has
+# no known cooldown.
 _rate_limit_lock = threading.Lock()
-_rate_limit_state = {"available_at": 0.0}  # epoch seconds; 0.0 = no known cooldown
+_rate_limit_state = {}  # label -> available_at epoch seconds
 
 _GO_DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)(h|ms|m|s)")
 
@@ -488,9 +492,10 @@ def _parse_retry_after_seconds(response):
         return None
 
 
-def _record_rate_limit(response):
+def _record_rate_limit(response, label):
     """
-    Called after every real Groq response (success or 429). Logs the raw
+    Called after every real Groq response (success or 429), for whichever
+    key (label: "primary" or "fallback") made the call. Logs the raw
     headers unconditionally first — this exact data was the one thing
     missing when a real ~56-minute stuck request needed diagnosing, so it
     is captured every time now, not just when something looks thin.
@@ -499,8 +504,8 @@ def _record_rate_limit(response):
     reset = response.headers.get("x-ratelimit-reset-tokens")
     retry_after = response.headers.get("Retry-After")
     logger.info(
-        "Groq response %s — x-ratelimit-remaining-tokens=%r x-ratelimit-reset-tokens=%r Retry-After=%r",
-        response.status_code, remaining, reset, retry_after,
+        "Groq response (%s key) %s — x-ratelimit-remaining-tokens=%r x-ratelimit-reset-tokens=%r Retry-After=%r",
+        label, response.status_code, remaining, reset, retry_after,
     )
 
     if remaining is None or reset is None:
@@ -518,44 +523,45 @@ def _record_rate_limit(response):
     reset_seconds = min(reset_seconds, MAX_REPORTED_COOLDOWN_SECONDS)
 
     with _rate_limit_lock:
-        _rate_limit_state["available_at"] = time.time() + reset_seconds
+        _rate_limit_state[label] = time.time() + reset_seconds
+
+
+def _seconds_until_available_for(label):
+    """Per-key cooldown check — used internally by _post_with_retry()."""
+    with _rate_limit_lock:
+        available_at = _rate_limit_state.get(label, 0.0)
+    return max(0.0, available_at - time.time())
 
 
 def seconds_until_available():
     """
-    Public — checked at the top of _post_with_retry() (raises
-    RateLimitedError instead of calling out to Groq at all when this is
-    positive) and by the /api/ai-status/ view, so the frontend can show a
-    countdown and disable "Process with AI" *before* OPS clicks into a
-    call that would just get refused.
+    Public — used by the /api/ai-status/ view so the frontend can show a
+    countdown and disable the AI-triggering buttons *before* OPS clicks
+    into a call that would just get refused. Reflects whichever
+    configured key becomes available soonest: if the fallback key is
+    free even while the primary is cooling down, the next real call
+    would succeed via the fallback, so this reports 0 in that case, not
+    the primary's cooldown — same "is a call ready to go right now"
+    question _post_with_retry() itself answers per key.
     """
-    with _rate_limit_lock:
-        available_at = _rate_limit_state["available_at"]
-    return max(0.0, available_at - time.time())
+    wait = _seconds_until_available_for("primary")
+    fallback_key = getattr(settings, "GROQ_API_KEY_FALLBACK", "")
+    if fallback_key:
+        wait = min(wait, _seconds_until_available_for("fallback"))
+    return wait
 
 
-def _post_with_retry(payload: dict, api_key: str) -> requests.Response:
+def _attempt_groq_call(payload: dict, api_key: str, label: str) -> requests.Response:
     """
-    POST to Groq once (plus a short bounded retry for a genuine network
-    blip — see MAX_NETWORK_ATTEMPTS). Never sleeps out a rate limit
-    in-request:
-    - If a cooldown recorded from an earlier response is still active,
-      raises RateLimitedError immediately — Groq isn't even called.
-    - If Groq itself returns 429 on this call, records the rate-limit
-      state (same as any other response) and raises RateLimitedError
-      immediately — no retry loop, no backoff sleep. A single worker
-      process (Render free tier's WEB_CONCURRENCY=1) can't absorb
-      blocking on that; the caller turns this into a fast response and
-      the frontend's existing cooldown UI (createCooldownController(),
-      /api/ai-status/) handles the actual wait and retry.
+    POST to Groq once with a specific key (plus a short bounded retry for
+    a genuine network blip — see MAX_NETWORK_ATTEMPTS). Never sleeps out
+    a rate limit in-request: a 429 records the rate-limit state under
+    this key's label (same as any other response) and raises
+    RateLimitedError immediately — no retry loop, no backoff sleep here.
     Any other failure (a real 4xx/5xx besides 429, or a network error
     that didn't recover within the short retry) is not transient and
     raises immediately.
     """
-    cooldown = seconds_until_available()
-    if cooldown > 0:
-        raise RateLimitedError(cooldown)
-
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
     delay = NETWORK_RETRY_BACKOFF_SECONDS
@@ -570,16 +576,84 @@ def _post_with_retry(payload: dict, api_key: str) -> requests.Response:
             time.sleep(delay)
             delay *= 2
 
-    _record_rate_limit(resp)
+    _record_rate_limit(resp, label)
 
     if resp.status_code == 429:
         retry_after = _parse_retry_after_seconds(resp)
         raise RateLimitedError(
-            retry_after if retry_after is not None else seconds_until_available()
+            retry_after if retry_after is not None else _seconds_until_available_for(label)
         )
 
     resp.raise_for_status()
     return resp
+
+
+def _post_with_retry(payload: dict) -> requests.Response:
+    """
+    Tries each configured key in order (primary, then fallback if one is
+    set) and returns the first successful response — the caller never
+    needs to know which key actually served the request. A key is
+    skipped without even being called if it's already known to be
+    cooling down (same "don't call out to Groq when we already know it'll
+    fail" principle as before, just applied per key now instead of
+    globally); a live 429 from a key falls through to the next one the
+    same way. Never sleeps out a rate limit in-request for either key —
+    see RateLimitedError.
+
+    A non-rate-limit failure on a key (bad credentials, an unexpected
+    Groq error) is caught too rather than left to crash the request —
+    confirmed necessary by testing: a genuinely invalid fallback key
+    returns 401, and letting that propagate raw would turn "the primary
+    is rate-limited, the backup didn't help either" into a confusing 500
+    instead of the same clean 503 OPS already knows how to wait out. If
+    at least one key reported an actual rate limit, that's surfaced as
+    RateLimitedError (with the SHORTER of any keys' remaining cooldowns,
+    so the caller's retry has the best chance of succeeding); a key's
+    unrelated failure only becomes the visible error when NO key ever
+    indicated a rate limit at all — same single-key behavior as before
+    when there's no fallback configured to fall through to.
+
+    Confirmed necessary in practice, not just defensive: Groq's free tier
+    can impose an account-level cooldown (observed once at ~54 minutes)
+    on top of the per-minute token budget, after enough sustained real
+    usage in one day — a single key has no way to route around that
+    itself.
+    """
+    primary_key = getattr(settings, "GROQ_API_KEY", "")
+    if not primary_key:
+        raise ExtractionError("GROQ_API_KEY is not configured.")
+    fallback_key = getattr(settings, "GROQ_API_KEY_FALLBACK", "")
+
+    shortest_wait = None
+    last_error = None
+
+    for label, api_key in (("primary", primary_key), ("fallback", fallback_key)):
+        if not api_key:
+            continue  # fallback simply isn't configured — nothing to try
+
+        cooldown = _seconds_until_available_for(label)
+        if cooldown > 0:
+            shortest_wait = cooldown if shortest_wait is None else min(shortest_wait, cooldown)
+            continue  # known-unavailable; don't spend a call finding that out again
+
+        try:
+            return _attempt_groq_call(payload, api_key, label)
+        except RateLimitedError as exc:
+            shortest_wait = (
+                exc.retry_after_seconds if shortest_wait is None
+                else min(shortest_wait, exc.retry_after_seconds)
+            )
+        except Exception as exc:
+            last_error = exc
+
+    if shortest_wait is not None:
+        # At least one key's status is a genuine rate limit — that's the
+        # relevant, actionable answer regardless of whether some other
+        # key also failed for an unrelated reason.
+        raise RateLimitedError(shortest_wait)
+    if last_error is not None:
+        raise last_error
+    raise ExtractionError("No Groq API key succeeded and none reported a rate limit.")
 
 
 def extract_incident_data(municipality_name: str, raw_text: str) -> dict:
@@ -590,10 +664,6 @@ def extract_incident_data(municipality_name: str, raw_text: str) -> dict:
     fill in or guess (the schema has no municipality field; see the system
     prompt).
     """
-    api_key = getattr(settings, "GROQ_API_KEY", "")
-    if not api_key:
-        raise ExtractionError("GROQ_API_KEY is not configured.")
-
     payload = {
         "model": GROQ_MODEL,
         "messages": [
@@ -606,7 +676,7 @@ def extract_incident_data(municipality_name: str, raw_text: str) -> dict:
         "stream": False,
     }
 
-    resp = _post_with_retry(payload, api_key)
+    resp = _post_with_retry(payload)
 
     try:
         content = resp.json()["choices"][0]["message"]["content"].strip()
@@ -716,10 +786,6 @@ def generate_synopsis(batch) -> str:
     if not sections:
         return _NO_INCIDENTS_SYNOPSIS
 
-    api_key = getattr(settings, "GROQ_API_KEY", "")
-    if not api_key:
-        raise ExtractionError("GROQ_API_KEY is not configured.")
-
     user_content = _build_synopsis_prompt_input(batch, summary, sections)
 
     payload = {
@@ -733,7 +799,7 @@ def generate_synopsis(batch) -> str:
         "stream": False,
     }
 
-    resp = _post_with_retry(payload, api_key)
+    resp = _post_with_retry(payload)
 
     try:
         content = resp.json()["choices"][0]["message"]["content"].strip()
@@ -785,10 +851,6 @@ def generate_weather_summary(batch) -> str:
     if not conditions:
         return _NO_WEATHER_DATA
 
-    api_key = getattr(settings, "GROQ_API_KEY", "")
-    if not api_key:
-        raise ExtractionError("GROQ_API_KEY is not configured.")
-
     user_content = "\n".join(conditions)
 
     payload = {
@@ -802,7 +864,7 @@ def generate_weather_summary(batch) -> str:
         "stream": False,
     }
 
-    resp = _post_with_retry(payload, api_key)
+    resp = _post_with_retry(payload)
 
     try:
         content = resp.json()["choices"][0]["message"]["content"].strip()

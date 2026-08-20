@@ -137,6 +137,13 @@ LOGOUT_REDIRECT_URL = "/accounts/login/"
 
 # ── AI provider keys (loaded from environment; used starting Step 3) ──
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+# Optional. A second Groq account's key, tried once if the primary key
+# comes back rate-limited — see ai._post_with_retry. Confirmed necessary
+# in practice: Groq's free tier can impose an account-level cooldown
+# (observed once at ~54 minutes) on top of the per-minute token budget,
+# after enough sustained real usage in one day. Leave blank to run with
+# just the primary key, identical to before this existed.
+GROQ_API_KEY_FALLBACK = os.getenv("GROQ_API_KEY_FALLBACK", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
