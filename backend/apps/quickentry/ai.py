@@ -238,6 +238,35 @@ OUTPUT:
   "unmapped_notes": "IPO line described as residential fire at Sample Homes — no explicit 'point of origin' time given; ipo field left for manual entry."
 }
 ---
+INPUT:
+WHAT: Water Rescue
+WHEN: February 8, 2026 | 1015H
+WHERE: Brgy. Look, Sample Town (fishpond area)
+DESCRIPTION: Two fishermen capsized when their boat overturned near the fishpond
+PERSONS INVOLVED:
+A. Male, 45 years old — Rescued, mild hypothermia, stable
+B. Male, 50 years old — Rescued, no visible injuries
+RESPONDERS: Sample Town DRRMO Water Rescue Team, Barangay Look tanod
+ACTIONS TAKEN: Deployed rescue boat and flotation devices, retrieved both individuals, provided first aid, monitored for delayed symptoms, released to family
+
+OUTPUT:
+{
+  "lifelines_status": {},
+  "road_crashes": [], "medical_assistance": [], "fire_incidents": [],
+  "water_incidents": [{
+    "datetime": "February 8, 2026 | 1015H",
+    "location": "Brgy. Look, Sample Town (fishpond area)", "barangay": "Look",
+    "incident_type": "Water Rescue",
+    "description": "Two fishermen capsized when their boat overturned near the fishpond",
+    "families_affected": 0, "individuals_affected": 2,
+    "casualties": 0, "injured": 1, "fatalities": 0,
+    "responding_team": "Sample Town DRRMO Water Rescue Team, Barangay Look tanod",
+    "actions_taken": "Deployed rescue boat and flotation devices, retrieved both individuals, provided first aid, monitored for delayed symptoms, released to family"
+  }],
+  "trauma_emergencies": [],
+  "unmapped_notes": "Victim A (Male, 45) had mild hypothermia; Victim B (Male, 50) had no visible injuries — water_incidents has no per-victim breakdown field, so these individual details are preserved here rather than lost inside the aggregate injured count."
+}
+---
 
 Return ONLY the JSON object. No markdown code fences, no commentary before or after."""
 
