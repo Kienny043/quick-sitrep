@@ -16,7 +16,12 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from .ai import extract_incident_data, seconds_until_available, ExtractionError
+from .ai import (
+    extract_incident_data,
+    generate_synopsis,
+    seconds_until_available,
+    ExtractionError,
+)
 from .models import (
     MUNICIPALITY_CHOICES,
     ManualBatch,
@@ -373,6 +378,26 @@ def save_entry(request):
         },
         status=status.HTTP_201_CREATED,
     )
+
+
+# ── POST /api/batches/<id>/generate-synopsis/ ──────────────────────────
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def generate_synopsis_view(request, pk):
+    """
+    Draft-only — never saves anything, and deliberately works on a DRAFT
+    batch (not just FINALIZED ones), since this is meant for OPS to use
+    while still filling out the finalize panel, before locking the batch.
+    The returned text still has to be explicitly submitted with the
+    finalize request afterward, same as if OPS had typed it by hand — this
+    endpoint doesn't touch batch.synopsis itself.
+    """
+    batch = get_object_or_404(ManualBatch, pk=pk)
+    try:
+        synopsis = generate_synopsis(batch)
+    except ExtractionError as exc:
+        return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+    return Response({"synopsis": synopsis})
 
 
 # ── POST /api/batches/<id>/finalize/ ───────────────────────────────────

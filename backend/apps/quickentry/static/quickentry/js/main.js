@@ -226,6 +226,7 @@ const API = {
   finalize: (id) => window.QUICKSITREP.endpoints.finalizeTemplate.replace("999999", id),
   download: (id) => window.QUICKSITREP.endpoints.downloadTemplate.replace("999999", id),
   entryDetail: (id) => window.QUICKSITREP.endpoints.entryDetailTemplate.replace("999999", id),
+  generateSynopsis: (id) => window.QUICKSITREP.endpoints.generateSynopsisTemplate.replace("999999", id),
 };
 
 // ── Small helpers ───────────────────────────────────────────────────
@@ -614,12 +615,12 @@ function renderEntryPanel() {
   }
 
   panel.innerHTML = html;
-  stopCooldownCountdown();
+  processCooldown.stop();
   if (state.extraction) {
     refreshValidation();
   } else {
     checkAiCooldown().then((secs) => {
-      if (secs > 0) startCooldownCountdown(secs);
+      if (secs > 0) processCooldown.start(secs);
     });
   }
 }
@@ -814,6 +815,8 @@ function renderFinalizePanel() {
   const done = state.municipalities.filter((m) => m.has_entry).length;
   const total = state.municipalities.length;
 
+  synopsisCooldown.stop();
+
   if (b.status === "FINALIZED") {
     const when = b.finalized_at ? new Date(b.finalized_at).toLocaleString() : "";
     panel.innerHTML = `
@@ -830,9 +833,15 @@ function renderFinalizePanel() {
   panel.innerHTML = `
     <h2>Finalize &amp; Generate PDF</h2>
     <p class="finalize-progress"><span id="finalize-progress">${done} / ${total}</span> municipalities reporting</p>
-    <label class="finalize-field">Synopsis
+    <label class="finalize-field">
+      <span class="finalize-field-header">
+        <span>Synopsis</span>
+        <button type="button" id="generate-synopsis-btn" class="btn btn-small" data-action="generate-synopsis">Generate Draft</button>
+      </span>
       <textarea data-finalize-field="synopsis" rows="3" placeholder="Province-wide narrative summary of this period's incidents…">${escapeHtml(state.finalizeForm.synopsis)}</textarea>
     </label>
+    <div id="synopsis-cooldown-notice"></div>
+    <div id="synopsis-error"></div>
     <label class="finalize-field">Weather Conditions
       <textarea data-finalize-field="weather_conditions" rows="2" placeholder="e.g. Partly cloudy, isolated rain showers, no tropical cyclone within PAR…">${escapeHtml(state.finalizeForm.weather_conditions)}</textarea>
     </label>
@@ -844,6 +853,10 @@ function renderFinalizePanel() {
     </div>
     <div id="finalize-message"></div>
   `;
+
+  checkAiCooldown().then((secs) => {
+    if (secs > 0) synopsisCooldown.start(secs);
+  });
 }
 
 function handleFinalizeFieldChange(e) {
@@ -890,6 +903,40 @@ async function handleFinalize() {
     msgBox.innerHTML = renderSaveError(err);
     btn.disabled = false;
     btn.textContent = "Finalize & Generate PDF";
+  }
+}
+
+async function handleGenerateSynopsis() {
+  const textarea = document.querySelector('[data-finalize-field="synopsis"]');
+  const errBox = document.getElementById("synopsis-error");
+  if (!textarea) return;
+  if (errBox) errBox.innerHTML = "";
+
+  if (textarea.value.trim() !== "") {
+    const confirmed = window.confirm("Replace your current synopsis with an AI-generated draft?");
+    if (!confirmed) return;
+  }
+
+  const btn = document.getElementById("generate-synopsis-btn");
+  btn.disabled = true;
+  btn.textContent = "Generating…";
+
+  try {
+    const result = await apiFetch(API.generateSynopsis(state.batch.id), { method: "POST" });
+    textarea.value = result.synopsis;
+    state.finalizeForm.synopsis = result.synopsis;
+  } catch (err) {
+    if (errBox) errBox.innerHTML = `<div class="alert alert-error">${escapeHtml(err.message)}</div>`;
+  }
+
+  btn.textContent = "Generate Draft";
+  // Re-check rather than just re-enabling — the call just made may itself
+  // have pushed the shared Groq rate limit into a cooldown state.
+  const secs = await checkAiCooldown();
+  if (secs > 0) {
+    synopsisCooldown.start(secs);
+  } else {
+    btn.disabled = false;
   }
 }
 
@@ -950,10 +997,12 @@ function handleRemoveVictim(section, idx, vIdx) {
 // ── Proactive AI rate-limit cooldown ─────────────────────────────
 // Mirrors ai.py's own reactive cooldown: rather than letting OPS click
 // into a call that the backend already knows would just wait (or 429),
-// check /api/ai-status/ before showing the paste box's "Process with AI"
-// button as clickable, and count down visibly if it isn't yet.
-let _cooldownTimer = null;
-
+// check /api/ai-status/ before showing an AI-triggering button as
+// clickable, and count down visibly if it isn't yet. Both "Process with
+// AI" and "Generate Draft" hit the same Groq account/rate limit, but they
+// live in separate, independently-rendered panels — each gets its own
+// controller instance (own timer, own button/notice) from this one
+// factory rather than a second copy-pasted countdown implementation.
 function formatCountdown(seconds) {
   const s = Math.max(0, Math.ceil(seconds));
   const m = Math.floor(s / 60);
@@ -970,43 +1019,63 @@ async function checkAiCooldown() {
   }
 }
 
-function stopCooldownCountdown() {
-  if (_cooldownTimer) {
-    clearInterval(_cooldownTimer);
-    _cooldownTimer = null;
-  }
-}
+function createCooldownController(getBtn, getNotice) {
+  let timer = null;
 
-function startCooldownCountdown(initialSeconds) {
-  stopCooldownCountdown();
-  const btn = document.querySelector('[data-action="process"]');
-  const notice = document.getElementById("ai-cooldown-notice");
-  if (!btn || !notice) return;
-  let remaining = initialSeconds;
-
-  const tick = () => {
-    if (remaining <= 0) {
-      stopCooldownCountdown();
-      // Re-check with the server rather than just trusting the local
-      // clock — it was seeded from a real value, but only once.
-      checkAiCooldown().then((secs) => {
-        if (secs > 0) {
-          startCooldownCountdown(secs);
-        } else {
-          btn.disabled = false;
-          notice.innerHTML = "";
-        }
-      });
-      return;
+  function stop() {
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
     }
-    btn.disabled = true;
-    notice.innerHTML = `<div class="alert alert-warning">AI cooling down — ready in ${formatCountdown(remaining)}</div>`;
-    remaining -= 1;
-  };
+  }
 
-  tick();
-  _cooldownTimer = setInterval(tick, 1000);
+  function start(initialSeconds) {
+    stop();
+    let remaining = initialSeconds;
+
+    const tick = () => {
+      const btn = getBtn();
+      const notice = getNotice();
+      if (!btn || !notice) {
+        stop();
+        return;
+      }
+      if (remaining <= 0) {
+        stop();
+        // Re-check with the server rather than just trusting the local
+        // clock — it was seeded from a real value, but only once.
+        checkAiCooldown().then((secs) => {
+          if (secs > 0) {
+            start(secs);
+          } else {
+            const b = getBtn();
+            const n = getNotice();
+            if (b) b.disabled = false;
+            if (n) n.innerHTML = "";
+          }
+        });
+        return;
+      }
+      btn.disabled = true;
+      notice.innerHTML = `<div class="alert alert-warning">AI cooling down — ready in ${formatCountdown(remaining)}</div>`;
+      remaining -= 1;
+    };
+
+    tick();
+    timer = setInterval(tick, 1000);
+  }
+
+  return { start, stop };
 }
+
+const processCooldown = createCooldownController(
+  () => document.querySelector('[data-action="process"]'),
+  () => document.getElementById("ai-cooldown-notice")
+);
+const synopsisCooldown = createCooldownController(
+  () => document.getElementById("generate-synopsis-btn"),
+  () => document.getElementById("synopsis-cooldown-notice")
+);
 
 // ── Process with AI ──────────────────────────────────────────────
 async function handleProcess() {
@@ -1173,7 +1242,8 @@ function initEventListeners() {
   const finalizePanel = document.getElementById("finalize-panel");
   finalizePanel.addEventListener("input", handleFinalizeFieldChange);
   finalizePanel.addEventListener("click", (e) => {
-    if (e.target.closest("#finalize-btn")) handleFinalize();
+    if (e.target.closest("#finalize-btn")) return handleFinalize();
+    if (e.target.closest("#generate-synopsis-btn")) return handleGenerateSynopsis();
   });
 }
 

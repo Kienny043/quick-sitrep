@@ -398,6 +398,8 @@ h1, h2, h3, h4 { margin: 0 0 0.4em; font-weight: 700; }
   display: block; font-size: 0.8rem; font-weight: 600; color: var(--text-muted);
   margin-bottom: 0.8rem;
 }
+.finalize-field-header { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; }
+#synopsis-cooldown-notice:empty, #synopsis-error:empty { display: none; }
 .finalize-field textarea {
   display: block; width: 100%; margin-top: 0.35rem; font-family: inherit;
   font-size: 0.88rem; font-weight: 400; color: var(--text);

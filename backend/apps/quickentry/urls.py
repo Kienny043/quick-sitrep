@@ -8,6 +8,11 @@ urlpatterns = [
     path("entries/extract/", views.extract_entry, name="quickentry-entries-extract"),
     path("entries/<int:pk>/", views.entry_detail, name="quickentry-entry-detail"),
     path("entries/save/", views.save_entry, name="quickentry-entries-save"),
+    path(
+        "batches/<int:pk>/generate-synopsis/",
+        views.generate_synopsis_view,
+        name="quickentry-batch-generate-synopsis",
+    ),
     path("batches/<int:pk>/finalize/", views.finalize_batch, name="quickentry-batch-finalize"),
     path("batches/<int:pk>/download/", views.download_batch, name="quickentry-batch-download"),
 ]

@@ -271,6 +271,43 @@ OUTPUT:
 Return ONLY the JSON object. No markdown code fences, no commentary before or after."""
 
 
+# Short prose paragraph, not JSON — this is a DRAFT for OPS to edit before
+# it goes into an official report, not a final statement. Deliberately
+# lower than MAX_TOKENS; a synopsis is a short paragraph, not a
+# schema-shaped extraction.
+SYNOPSIS_MAX_TOKENS = 600
+
+SYNOPSIS_SYSTEM_PROMPT = """You are drafting a short narrative synopsis paragraph for a Philippine LGU
+disaster response situational report (Quezon Province PDRRMO). You will be
+given already-computed incident counts and per-municipality incident
+detail for one reporting period — never recompute those counts yourself,
+only use the ones given to you.
+
+This is a DRAFT for a human OPS officer to review and edit before it goes
+into an official report — write plainly and concisely, not floridly.
+
+RULES:
+- Summarize only what is actually present in the data you were given:
+  counts, municipalities involved, incident types, and any notable
+  pattern (e.g. multiple incidents concentrated in one municipality or
+  barangay, a cluster of the same incident type).
+- Never invent or guess a detail, number, or cause that isn't present in
+  the input. If the input has few or no notable incidents, say so plainly
+  and briefly — do not pad or fabricate content to sound more substantial
+  than the data supports.
+- Do not include recommendations, next steps, or projected outlook — this
+  is a factual overview of what was reported, nothing else.
+- Plain prose, one short paragraph (two only if there's genuinely enough
+  distinct material to warrant it). No headers, no bullet points, no
+  markdown formatting.
+- If there are no entries, or every count is zero, state plainly that no
+  significant incidents were reported for the period — don't stretch that
+  into a longer paragraph than the fact warrants.
+
+Return ONLY the synopsis text. No preamble, no commentary, no quotation
+marks around it."""
+
+
 # ── Proactive rate-limit cooldown ───────────────────────────────────
 # Reactive, not predictive: we never guess how expensive a report will be
 # to process. Instead, every real Groq response tells us exactly how much
@@ -453,3 +490,125 @@ def extract_incident_data(municipality_name: str, raw_text: str) -> dict:
         raise ExtractionError(
             f"Groq response was not valid JSON: {exc}. Raw response: {content[:500]}"
         ) from exc
+
+
+# Per-incident detail lines feed into the synopsis prompt as free-form
+# context (not extracted data), so a hard length cap here is just about
+# keeping the prompt bounded for batches with many/verbose entries — it
+# doesn't need to be exact, just not unbounded.
+_SYNOPSIS_DETAIL_MAX_CHARS = 300
+
+# For each incident type, which field holds its distinguishing free-text
+# label (fire/road have none — cause/structure_type are less central than
+# the actions_taken narrative itself) and which holds its narrative detail.
+_SYNOPSIS_INCIDENT_FIELDS = [
+    ("road_crashes", "Road Crash", "cause", "actions_taken"),
+    ("medical_assistance", "Medical Assistance", "nature_of_illness", "actions_taken"),
+    ("fire_incidents", "Fire Incident", "structure_type", "actions_taken"),
+    ("water_incidents", "Water Incident", "incident_type", "description"),
+    ("trauma_emergencies", "Trauma Emergency", "call_type", "actions_taken"),
+]
+
+
+def _build_synopsis_prompt_input(batch, summary, sections) -> str:
+    """
+    Assembles the plain-text context handed to the model: the same
+    compute_summary() counts the PDF's Section III and the dashboard cards
+    use (never re-derived here — see pdf.py), plus each municipality's
+    saved incidents and their actions_taken/description text. Only called
+    when sections is non-empty — see generate_synopsis's own short-circuit
+    for the all-zero case.
+    """
+    lines = [
+        f"Reporting period: {batch.date} ({batch.get_shift_display()})",
+        f"Municipalities with at least one saved entry: {batch.entries.count()}",
+        "",
+        "Counts (already computed — restate, never recompute or contradict these):",
+        f"- Road crashes: {summary['road_crash_total']} "
+        f"(injuries — minor: {summary['victims_minor']}, major: {summary['victims_major']}, "
+        f"fatalities: {summary['victims_fatality']})",
+        f"- Medical assistance cases: {summary['medical_total']}",
+        f"- Fire incidents: {summary['fire_total']} "
+        f"(casualties: {summary['fire_casualties']}, injured: {summary['fire_injured']}, "
+        f"fatalities: {summary['fire_fatalities']})",
+        f"- Water incidents: {summary['water_total']} "
+        f"(casualties: {summary['water_casualties']}, injured: {summary['water_injured']}, "
+        f"fatalities: {summary['water_fatalities']})",
+        f"- Trauma emergencies: {summary['trauma_total']}",
+        "",
+        "Per-municipality incident detail:",
+    ]
+
+    for section in sections:
+        lines.append(f"\n{section['municipality_name']}:")
+        for key, label, type_field, detail_field in _SYNOPSIS_INCIDENT_FIELDS:
+            for item in section[key]:
+                type_note = getattr(item, type_field, None) or ""
+                detail = (getattr(item, detail_field, None) or "").strip()
+                detail = detail[:_SYNOPSIS_DETAIL_MAX_CHARS]
+                suffix = f" ({type_note})" if type_note else ""
+                lines.append(f"  - {label}{suffix}: {detail}")
+
+    return "\n".join(lines)
+
+
+# Returned directly, without a Groq call, when a batch has no incidents to
+# summarize — this outcome is entirely mechanical (there is exactly one
+# correct thing to say), and testing showed the model tends to phrase it
+# as an awkward "no X, no Y, no Z" enumeration rather than the plain
+# sentence it was asked for. Deterministic in, deterministic out.
+_EMPTY_BATCH_SYNOPSIS = "No entries have been saved for this batch yet — nothing to summarize."
+_NO_INCIDENTS_SYNOPSIS = "No significant incidents were reported for this period."
+
+
+def generate_synopsis(batch) -> str:
+    """
+    Drafts a short narrative synopsis paragraph from a batch's already-
+    saved entries — never touches the database, never called in JSON
+    mode (the response is prose, not structured data). Reuses
+    _post_with_retry/the module's cooldown state rather than a second
+    rate-limit implementation, same Groq account either way. Local pdf.py
+    import to keep pdf.py's own import graph (models/logo_base64 only)
+    simple and one-directional — pdf.py has no reason to know ai.py exists.
+    """
+    from .pdf import build_municipality_sections, compute_summary
+
+    if not batch.entries.exists():
+        return _EMPTY_BATCH_SYNOPSIS
+
+    summary = compute_summary(batch)
+    sections = build_municipality_sections(batch)
+    if not sections:
+        return _NO_INCIDENTS_SYNOPSIS
+
+    api_key = getattr(settings, "GROQ_API_KEY", "")
+    if not api_key:
+        raise ExtractionError("GROQ_API_KEY is not configured.")
+
+    user_content = _build_synopsis_prompt_input(batch, summary, sections)
+
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [
+            {"role": "system", "content": SYNOPSIS_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+        "temperature": 0.2,
+        "max_tokens": SYNOPSIS_MAX_TOKENS,
+        "stream": False,
+    }
+
+    resp = _post_with_retry(payload, api_key)
+
+    try:
+        content = resp.json()["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, ValueError) as exc:
+        raise ExtractionError(f"Unexpected Groq response shape: {exc}") from exc
+
+    # Defensive: the model was told not to quote-wrap the result, but strip
+    # a wrapping pair if it does anyway — matches extract_incident_data's
+    # own defensive fence-stripping in spirit.
+    if len(content) >= 2 and content[0] == content[-1] == '"':
+        content = content[1:-1].strip()
+
+    return content
