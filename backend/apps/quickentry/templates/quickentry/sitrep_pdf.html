@@ -155,8 +155,8 @@
           <p><span class="what">WHAT:</span> Fire Incident</p>
           <p><strong>WHEN:</strong> {{ fi.datetime|date:"d F Y, H:i" }}</p>
           <p><strong>WHERE:</strong> {{ fi.location }}{% if fi.barangay and fi.barangay not in fi.location %}, Brgy. {{ fi.barangay }}{% endif %}</p>
-          <p><strong>IPO/DTR/TED/TAS:</strong> {{ fi.ipo|time:"H:i" }} / {{ fi.dtr|time:"H:i" }} / {{ fi.ted|time:"H:i" }} / {{ fi.tas|time:"H:i" }}
-            (Response time: {{ fi.response_time_minutes }} min, Distance: {{ fi.distance_km }} km)</p>
+          <p><strong>CAUSE:</strong> {{ fi.cause }}</p>
+          <p><strong>RESPONSE TIME / DISTANCE:</strong> {{ fi.response_time_minutes }} min / {{ fi.distance_km }} km</p>
           <p><strong>STRUCTURE TYPE:</strong> {{ fi.structure_type }}</p>
           <p><strong>FAMILIES / INDIVIDUALS AFFECTED:</strong> {{ fi.families_affected }} / {{ fi.individuals_affected }}
             &nbsp;|&nbsp; <strong>STRUCTURES BURNED:</strong> {{ fi.structures_burned }}

@@ -93,11 +93,6 @@ RULES:
   clears that bar, note it — a silently dropped real detail is a worse
   failure than an over-cautious note.
 - Never compute summary counts or totals — that's handled downstream.
-- For fire incidents: if there's an "IPO" line, it usually contains a
-  location/incident description, NOT a time — map that text into
-  location/barangay, leave the ipo field null, and also note it in
-  unmapped_notes. Only extract dtr/ted/tas as times if clearly labeled
-  with actual clock times.
 - If a per-person or per-item qualitative detail (symptom, condition,
   notable circumstance) can't be preserved because the target field only
   holds an aggregate count or a bare classification, note the specific
@@ -147,8 +142,7 @@ JSON SCHEMA:
   "fire_incidents": [
     {
       "datetime": "string", "location": "string", "barangay": "string or null",
-      "ipo": "string or null (REQUIRED before save)", "dtr": "string or null (REQUIRED before save)",
-      "ted": "string or null (REQUIRED before save)", "tas": "string or null (REQUIRED before save)",
+      "cause": "string",
       "response_time_minutes": "number or 0", "distance_km": "number or 0",
       "structure_type": "string", "families_affected": "number or 0",
       "individuals_affected": "number or 0", "structures_burned": "number or 0",
@@ -240,15 +234,17 @@ OUTPUT:
 }
 ---
 INPUT:
-IPO: Residential Fire at Sample Homes, Brgy. Malinis, Sample City
-DTR: 15 February 2026 | 1000H
-TED: 15 February 2026 | 1002H
-TAS: 15 February 2026 | 1006H
+WHAT: Residential Fire
+WHEN: 15 February 2026 | 1000H
+WHERE: Sample Homes, Brgy. Malinis, Sample City
+CAUSE OF FIRE: Electrical Short Circuit
 RESPONSE TIME: 4 minutes
 DISTANCE: 2.0 km
 TYPE OF STRUCTURE: Single-Storey Residential
 NO. OF FAMILIES AFFECTED: 1
 NO. OF INDIVIDUALS AFFECTED: 3
+RESPONDING TEAM: Sample City BFP
+ACTIONS TAKEN: Fire suppressed, area secured, no casualties reported
 
 OUTPUT:
 {
@@ -256,13 +252,14 @@ OUTPUT:
   "road_crashes": [], "medical_assistance": [],
   "fire_incidents": [{
     "datetime": "15 February 2026 | 1000H", "location": "Sample Homes, Brgy. Malinis, Sample City", "barangay": "Malinis",
-    "ipo": null, "dtr": "15 February 2026 | 1000H", "ted": "15 February 2026 | 1002H", "tas": "15 February 2026 | 1006H",
+    "cause": "Electrical Short Circuit",
     "response_time_minutes": 4, "distance_km": 2.0, "structure_type": "Single-Storey Residential",
     "families_affected": 1, "individuals_affected": 3, "structures_burned": 0, "fire_area_sqm": 0,
-    "casualties": 0, "injured": 0, "fatalities": 0, "responding_team": null, "actions_taken": null
+    "casualties": 0, "injured": 0, "fatalities": 0, "responding_team": "Sample City BFP",
+    "actions_taken": "Fire suppressed, area secured, no casualties reported"
   }],
   "water_incidents": [], "trauma_emergencies": [],
-  "unmapped_notes": "IPO line described as residential fire at Sample Homes — no explicit 'point of origin' time given; ipo field left for manual entry."
+  "unmapped_notes": ""
 }
 ---
 INPUT:

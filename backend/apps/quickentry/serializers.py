@@ -35,7 +35,7 @@ class NullToBlankMixin:
     null_to_blank_fields before validation runs.
 
     Deliberately NOT applied to fields that should stay strictly
-    required (barangay, FireIncident's ipo/dtr/ted/tas) — those must
+    required (barangay, RoadCrash/FireIncident's cause) — those must
     keep raising a clear required-field error instead of silently
     becoming blank.
     """
@@ -208,10 +208,11 @@ class FireIncidentSerializer(serializers.ModelSerializer):
         fields = [
             "id", "entry", "datetime", "location", "barangay",
             "latitude", "longitude",
-            # ipo/dtr/ted/tas: no blank=True on the model, so DRF marks
-            # these required=True automatically — a missing/null value
-            # here surfaces as a normal per-field 400, not a DB error.
-            "ipo", "dtr", "ted", "tas",
+            # cause: no blank=True on the model, so DRF marks it
+            # required=True automatically — same treatment as
+            # RoadCrash.cause, a missing/null value here surfaces as a
+            # normal per-field 400, not a DB error.
+            "cause",
             "response_time_minutes", "distance_km", "structure_type",
             "families_affected", "individuals_affected", "structures_burned",
             "fire_area_sqm", "casualties", "injured", "fatalities",

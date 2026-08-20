@@ -303,13 +303,13 @@ class FireIncident(models.Model):
     longitude = models.DecimalField(
         max_digits=9, decimal_places=6, null=True, blank=True
     )
-    # Required, no default — matches the main system exactly. The preview
-    # UI (later step) blocks saving a fire incident until all four are
-    # filled in; the model itself enforces the same constraint.
-    ipo = models.TimeField()
-    dtr = models.TimeField()
-    ted = models.TimeField()
-    tas = models.TimeField()
+    # ipo/dtr/ted/tas (BFP's four-timestamp incident timeline) were
+    # dropped per client direction in favor of the same 4W1H convention
+    # every other incident type already uses — this is a deliberate,
+    # client-directed divergence from apps/ops/models.py in the main
+    # repo (see CLAUDE.md's note on field mirroring), not an oversight;
+    # re-check with the client, not just the main repo, before reverting.
+    cause = models.CharField(max_length=255)
     response_time_minutes = models.PositiveIntegerField(default=0)
     distance_km = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     structure_type = models.CharField(max_length=100)

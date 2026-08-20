@@ -73,10 +73,7 @@ const INCIDENT_TYPES = {
       { key: "datetime", label: "Date / Time", type: "datetime" },
       { key: "location", label: "Location", type: "text" },
       { key: "barangay", label: "Barangay", type: "text" },
-      { key: "ipo", label: "IPO", type: "time" },
-      { key: "dtr", label: "DTR", type: "time" },
-      { key: "ted", label: "TED", type: "time" },
-      { key: "tas", label: "TAS", type: "time" },
+      { key: "cause", label: "Cause", type: "text" },
       { key: "response_time_minutes", label: "Response Time (min)", type: "number" },
       { key: "distance_km", label: "Distance (km)", type: "number", float: true, step: "0.01" },
       { key: "structure_type", label: "Structure Type", type: "text" },
@@ -91,7 +88,7 @@ const INCIDENT_TYPES = {
       { key: "actions_taken", label: "Actions Taken", type: "textarea" },
     ],
     blank: () => ({
-      datetime: "", location: "", barangay: "", ipo: "", dtr: "", ted: "", tas: "",
+      datetime: "", location: "", barangay: "", cause: "",
       response_time_minutes: 0, distance_km: 0, structure_type: "", families_affected: 0,
       individuals_affected: 0, structures_burned: 0, fire_area_sqm: 0, casualties: 0,
       injured: 0, fatalities: 0, responding_team: "", actions_taken: "",
@@ -342,21 +339,6 @@ function parseRoughDatetime(raw) {
   return `${year}-${pad(month)}-${pad(day)}T${pad(hh)}:${pad(mm)}`;
 }
 
-function parseRoughTime(raw) {
-  if (!raw || typeof raw !== "string") return null;
-  const trimmed = raw.trim();
-  let m = trimmed.match(/^(\d{2}):(\d{2})(:\d{2})?$/);
-  if (m) return `${m[1]}:${m[2]}`;
-  m = trimmed.match(/(\d{3,4})H?\s*$/i);
-  if (m) {
-    const t = m[1].padStart(4, "0");
-    const hh = t.slice(0, 2), mm = t.slice(2);
-    if (parseInt(hh, 10) > 23 || parseInt(mm, 10) > 59) return null;
-    return `${hh}:${mm}`;
-  }
-  return null;
-}
-
 // ── Normalize a fresh AI extraction into editable UI state ─────────
 function normalizeExtraction(raw) {
   const clone = JSON.parse(JSON.stringify(raw || {}));
@@ -375,13 +357,6 @@ function normalizeIncidentItem(sectionKey, rawItem) {
 
   item._raw_datetime = item.datetime || "";
   item.datetime = parseRoughDatetime(item.datetime) || "";
-
-  if (sectionKey === "fire_incidents") {
-    for (const tf of ["ipo", "dtr", "ted", "tas"]) {
-      item["_raw_" + tf] = item[tf] || "";
-      item[tf] = parseRoughTime(item[tf]) || "";
-    }
-  }
 
   for (const f of INCIDENT_TYPES[sectionKey].fields) {
     if (f.type === "number") {
