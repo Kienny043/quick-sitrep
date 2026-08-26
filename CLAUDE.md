@@ -299,6 +299,25 @@ only one counting implementation, not two that could drift apart.
   `main.js`'s `INCIDENT_TYPES.*.fields` lists (which fields even render
   per incident type) are still hardcoded and must be updated by hand
   when a model/serializer field is added or removed (see Known Gaps).
+- **A required `<select>` (e.g. victim `injury_classification`) must
+  never default a genuinely-unset AI value to whichever option is
+  first in the list.** Fixed 2026-08-25 (client alpha-test bug #2,
+  reported as "AI downgrades Major injuries to Minor"): the actual root
+  cause was NOT the AI — a real report reproduced live confirmed the
+  model correctly leaves `injury_classification` null when a report
+  states one aggregate severity for several listed victims instead of
+  per-victim (and says so in `unmapped_notes`). The bug was
+  `normalizeIncidentItem()` in `main.js` silently coercing that null to
+  `"MINOR"` — the *least* severe option — before the required-field
+  check ever saw it, so a real Major/Fatality injury could reach a
+  saved record looking like an actively-chosen "Minor". Fixed by
+  leaving it `""` (so `isBlank()`/the blocking-validation UI correctly
+  flags it) and giving `renderField()`'s `<select>` case a genuine blank
+  placeholder option so an unset value never visually looks like the
+  first real option was chosen. The system prompt also gained an
+  explicit rule: when a report states one classification for a group of
+  victims, apply it to all of them (reading a stated value, not
+  guessing one) rather than leaving it null and creating manual work.
 
 ### Fail-fast rate limiting (the most load-bearing design decision in this file)
 

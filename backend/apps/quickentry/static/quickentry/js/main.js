@@ -377,7 +377,19 @@ function normalizeIncidentItem(sectionKey, rawItem) {
       if (victim.sex == null) victim.sex = "";
       if (victim.address == null) victim.address = "";
       if (victim.injuries == null) victim.injuries = "";
-      if (!victim.injury_classification) victim.injury_classification = "MINOR";
+      // Do NOT default a missing classification to "MINOR" -- alpha-test
+      // bug #2 (client feedback, 2026-08-25): a report can state an
+      // overall/aggregate severity ("Classification of Injury: Major")
+      // without breaking it down per victim, which the AI correctly
+      // leaves null rather than guess (see the unmapped_notes rule in
+      // ai.py's SYSTEM_PROMPT). Silently coercing that null to the LEAST
+      // severe option meant a real Major/Fatality injury could reach a
+      // saved record looking like an active "Minor" classification the
+      // AI supposedly chose, when nothing was actually chosen. Leaving
+      // it "" instead makes isBlank()/renderField() correctly flag it as
+      // a required field OPS must consciously fill in -- same
+      // never-silently-guess principle as parseRoughDatetime().
+      if (victim.injury_classification == null) victim.injury_classification = "";
       return victim;
     });
   }
@@ -414,10 +426,24 @@ function renderField(section, idx, victimIndex, field, value, parentItem) {
     case "textarea":
       inputHtml = `<textarea ${attrs} rows="2">${escapeHtml(value || "")}</textarea>`;
       break;
-    case "select":
-      inputHtml = `<select ${attrs}>${field.options.map((o) =>
+    case "select": {
+      // A blank/unrecognized value (e.g. injury_classification left null
+      // by the AI -- see normalizeIncidentItem) must render as visibly
+      // unselected, not silently fall back to whichever option happens
+      // to be first in the list -- that's exactly how alpha-test bug #2
+      // slipped through (an unset classification LOOKED like "Minor" was
+      // already chosen). Every real option in field.options is a genuine
+      // saved value already (lifelines fields always arrive pre-filled
+      // via blankLifelines()), so this placeholder only ever shows up
+      // for a true no-value case.
+      const matchesOption = field.options.includes(value);
+      const placeholder = matchesOption
+        ? ""
+        : `<option value="" selected disabled hidden>-- Select --</option>`;
+      inputHtml = `<select ${attrs}>${placeholder}${field.options.map((o) =>
         `<option value="${o}" ${o === value ? "selected" : ""}>${o}</option>`).join("")}</select>`;
       break;
+    }
     case "checkbox":
       inputHtml = `<input type="checkbox" ${attrs} ${value ? "checked" : ""}>`;
       break;

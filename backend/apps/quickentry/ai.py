@@ -140,6 +140,18 @@ RULES:
   have been raining"; that's a guess about the cause of an incident, not
   a report of what was actually observed and stated. Leave it "" if the
   report never states a weather observation.
+- A road crash's victim injury_classification is stated EITHER per
+  victim, OR once for the whole incident, covering every listed victim
+  as a group (e.g. a single "Classification of Injury: Major" line above
+  a numbered list of several victims, none individually reclassified).
+  When it's stated once for the group, apply that SAME stated value to
+  every victim in that group — this is reading an explicitly given
+  value, not guessing one, so it does not fall under "never guess a
+  value you're not confident about" above. Only leave a victim's
+  injury_classification null when no classification — neither per-victim
+  nor group-level — is stated anywhere in the report; do not infer a
+  severity yourself from the injury description alone (e.g. don't decide
+  a fracture "must be" MAJOR if the report never actually classifies it).
 
 JSON SCHEMA:
 {
