@@ -15,6 +15,7 @@ import logging
 import re
 import threading
 import time
+import unicodedata
 
 import requests
 from django.conf import settings
@@ -504,6 +505,30 @@ def _parse_retry_after_seconds(response):
         return None
 
 
+def _is_groq_rate_limit_413(response):
+    """
+    Alpha-test bug #4 (client feedback, 2026-08-25): reproduced live
+    against real Groq while diagnosing it — a report with enough
+    decorative Unicode (see _normalize_decorative_unicode) can push a
+    single request's estimated token cost over the account's per-minute
+    (TPM) budget. Groq reports THIS specific case as 413, not 429:
+    {"error": {"message": "Request too large ... tokens per minute
+    (TPM): Limit 8000, Requested 8073 ...", "code": "rate_limit_exceeded"}}
+    — still with a real Retry-After header, so it recovers the exact
+    same way an ordinary 429 does once the per-minute window rolls over.
+    Checked via the body's code field specifically so a genuinely
+    different 413 (malformed/oversized payload, unrelated to rate
+    limiting) still falls through to a normal ExtractionError rather
+    than being misreported as a waitable rate limit.
+    """
+    if response.status_code != 413:
+        return False
+    try:
+        return response.json().get("error", {}).get("code") == "rate_limit_exceeded"
+    except ValueError:
+        return False
+
+
 def _record_rate_limit(response, label):
     """
     Called after every real Groq response (success or 429), for whichever
@@ -572,7 +597,8 @@ def _attempt_groq_call(payload: dict, api_key: str, label: str) -> requests.Resp
     RateLimitedError immediately — no retry loop, no backoff sleep here.
     Any other failure (a real 4xx/5xx besides 429, or a network error
     that didn't recover within the short retry) is not transient and
-    raises immediately.
+    raises immediately — always as ExtractionError (see below), never a
+    bare requests.HTTPError.
     """
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
@@ -590,13 +616,27 @@ def _attempt_groq_call(payload: dict, api_key: str, label: str) -> requests.Resp
 
     _record_rate_limit(resp, label)
 
-    if resp.status_code == 429:
+    if resp.status_code == 429 or _is_groq_rate_limit_413(resp):
         retry_after = _parse_retry_after_seconds(resp)
         raise RateLimitedError(
             retry_after if retry_after is not None else _seconds_until_available_for(label)
         )
 
-    resp.raise_for_status()
+    # Alpha-test bug #4 (client feedback, 2026-08-25): resp.raise_for_status()
+    # used to run unguarded here, which raises a bare requests.HTTPError for
+    # ANY non-2xx/non-429 response (a 413, a 400, a transient 5xx, ...).
+    # views.py only catches RateLimitedError/ExtractionError, so that raw
+    # HTTPError reached Django uncaught -> an opaque 500 with no usable
+    # message, reproduced live against Groq's real API while diagnosing
+    # this (a "413 Payload Too Large" on an otherwise-ordinary call).
+    # Wrapping it here means EVERY Groq-side failure, whatever the status,
+    # becomes a normal ExtractionError -> a clean 502 with Groq's own
+    # message intact, through the same path extract_entry/generate_synopsis_
+    # view/generate_weather_view already handle.
+    if not resp.ok:
+        raise ExtractionError(
+            f"Groq returned {resp.status_code}: {resp.text[:500]}"
+        )
     return resp
 
 
@@ -668,6 +708,29 @@ def _post_with_retry(payload: dict) -> requests.Response:
     raise ExtractionError("No Groq API key succeeded and none reported a rate limit.")
 
 
+def _normalize_decorative_unicode(text: str) -> str:
+    """
+    Alpha-test bug #4 (client feedback, 2026-08-25): a report pasted from
+    a "fancy text" generator (e.g. YayText-style bold-via-unicode) failed
+    with a 500. The client's own manual workaround was stripping the
+    styling to plain text before pasting. NFKC (Unicode compatibility
+    normalization) does exactly that automatically: the Mathematical
+    Alphanumeric Symbols block those generators use (confirmed against a
+    real saved report — "\U0001d648\U0001d63f\U0001d64d\U0001d64d..." for
+    "MDRRMO...") has compatibility mappings back to plain ASCII letters,
+    so NFKC folds "\U0001d648\U0001d63f\U0001d64d\U0001d64d\U0001d648\U0001d64a"
+    -> "MDRRMO". Genuine content — emoji, accented characters (barangay/
+    surname spelling), other scripts — has no such compatibility mapping
+    and passes through unchanged; confirmed against a real report
+    containing both (the emoji stayed, the decorative header didn't).
+    This also reduces token usage, since decorative Unicode code points
+    often cost several tokens each versus one for the plain letter they
+    represent — the client's report of "unclear whether length or
+    Unicode" was plausibly both at once for the same reason.
+    """
+    return unicodedata.normalize("NFKC", text)
+
+
 def extract_incident_data(municipality_name: str, raw_text: str) -> dict:
     """
     Extract structured incident data from one municipality's pasted report
@@ -676,6 +739,7 @@ def extract_incident_data(municipality_name: str, raw_text: str) -> dict:
     fill in or guess (the schema has no municipality field; see the system
     prompt).
     """
+    raw_text = _normalize_decorative_unicode(raw_text)
     payload = {
         "model": GROQ_MODEL,
         "messages": [

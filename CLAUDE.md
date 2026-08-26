@@ -361,6 +361,48 @@ request-handling path may sleep to wait out a rate limit.** Instead:
   can disable AI-triggering buttons *before* OPS clicks into a call that
   would just get refused.
 
+### Every Groq-side failure becomes ExtractionError — never a raw HTTPError
+
+Fixed 2026-08-25 (client alpha-test bug #4, reported as "500 error on
+long/decorated input"). `_attempt_groq_call()` used to call
+`resp.raise_for_status()` unguarded for anything that wasn't a 429 —
+that raises a bare `requests.exceptions.HTTPError`, which none of the
+views catch (`extract_entry`/`generate_synopsis_view`/
+`generate_weather_view` only catch `RateLimitedError`/`ExtractionError`),
+so it reached Django uncaught as an opaque 500 with no usable message.
+Reproduced live against Groq while diagnosing this — now `_attempt_groq_call`
+raises `ExtractionError` (a clean 502, `detail` intact) for **any**
+non-2xx/non-429 response, whatever the status code.
+
+That real reproduction also explained the client's actual root cause,
+which turned out to be neither pure length nor pure Unicode but both at
+once: a report pasted from a "fancy text" generator (bold-via-Unicode,
+e.g. YayText) pushed a request's estimated cost over Groq's per-minute
+token (TPM) budget — confirmed via the real response body: `"Request
+too large ... TPM: Limit 8000, Requested 8073 ... code:
+rate_limit_exceeded"`. Groq reports **this specific case as 413, not
+429** — `_is_groq_rate_limit_413()` recognizes it via that body code
+(never by status code alone, so a genuinely different 413 still becomes
+a hard `ExtractionError`) and routes it through the same
+`RateLimitedError`/cooldown path as an ordinary 429, since it carries a
+real `Retry-After` header and recovers the same way once the per-minute
+window rolls over.
+
+The actual fix for the trigger itself: `_normalize_decorative_unicode()`
+runs NFKC (Unicode compatibility normalization) on `raw_text` before it
+reaches Groq, in `extract_incident_data` only — never touching the
+saved `ManualEntry.raw_text` accountability record. This folds
+"fancy text" letter styling (Mathematical Alphanumeric Symbols) back to
+plain ASCII automatically — confirmed against a real saved report
+(`"𝙈𝘿𝙍𝙍𝙈𝙊..."` → `"MDRRMO..."`) — which is exactly the client's own
+manual workaround (stripping the styling), now automatic. Genuine
+content (emoji, accented characters, other scripts) has no such
+compatibility mapping and passes through unchanged. This also directly
+addresses the length side of the symptom: decorative Unicode code
+points often cost several tokens each under the model's tokenizer
+versus one for the plain letter they represent, so normalizing reduces
+token cost too, not just visual styling.
+
 ### Fallback key (`GROQ_API_KEY_FALLBACK`, optional)
 
 Groq's free tier can impose an **account-level** cooldown (observed once
