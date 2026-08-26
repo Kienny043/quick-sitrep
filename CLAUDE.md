@@ -467,17 +467,37 @@ instruction, since deleting user accounts wasn't itself the ask.
   which fields are *required*, not which fields *exist* per incident
   type. Adding/removing a model field means updating both the
   serializer and this JS list by hand; they can silently drift.
-- **`parseRoughDatetime()` only handles two date formats** (pipe-
-  separated — `"February 11, 2026 | 0900H"` — and comma-separated —
-  `"February 19, 2026, 0600H"`). Anything else fails to parse and leaves
-  the date/time picker blocked rather than guessing — this is
-  deliberate, not an oversight: the AI's raw `datetime` string is never
-  auto-committed to a `DateTimeField`. OPS must always see a real
-  date/time picker and confirm or correct the value before save, per the
-  spec's "never silently guess" rule. When adding a new format, extend
-  `parseRoughDatetime` additively (add another `splitDateTime_*` helper)
-  rather than replacing the existing patterns — reports in the wild mix
-  formats, sometimes within the same batch.
+- **`parseRoughDatetime()` only recognizes specific date/time formats**
+  — as of 2026-08-25 (client alpha-test bugs #3/#5) that's: pipe
+  (`"February 11, 2026 | 0900H"`), comma (`"February 19, 2026, 0600H"`),
+  slash (`"Aug. 25, 2026/1016H"`), military-time-first
+  (`"2306H August 24, 2026"`), and 12-hour-time-first
+  (`"12:00am Aug 25 2026"`), plus abbreviated months with or without a
+  trailing period (`"Aug"`/`"Aug."`). Anything else — notably free-form
+  prose like `"August 25 around 1:15am"` (seen in a real Polillo report)
+  — still fails to parse and leaves the date/time picker blocked rather
+  than guessing. This is deliberate, not an oversight: the AI's raw
+  `datetime` string is never auto-committed to a `DateTimeField`. OPS
+  must always see a real date/time picker and confirm or correct the
+  value before save, per the spec's "never silently guess" rule. When
+  adding a new format, extend `parseRoughDatetime` additively (add
+  another `splitDateTime_*` helper) rather than replacing the existing
+  patterns — reports in the wild mix formats, sometimes within the same
+  batch.
+  **What alpha-test bug #3 ("rigid input-pattern validation rejects
+  valid data") actually was**, diagnosed against the real Calauag/
+  Pagbilao production entries rather than assumed: there is no separate
+  hard validator anywhere in this codebase. It was two unrelated things
+  wearing the same symptom: (a) the datetime-format gap above — the AI
+  read the raw string correctly (shown via the "AI read: ..." hint) but
+  the picker couldn't parse it, now fixed for those two reports' exact
+  formats; and (b) the schema-driven required-field UI correctly
+  blocking on `cause`/`responding_team` when the SOURCE report simply
+  never stated one (Calauag's report has no cause line at all; Pagbilao
+  names individual responders but no team name) — working as designed,
+  not a bug, though worth a future UX pass making that distinction
+  clearer to OPS than a plain red asterisk (e.g. "not stated in the
+  source report").
 - **Leftover `ops_test` superuser account in the production database**
   — see Production Operations. Cleanup candidate, not yet removed.
 - **Migration path into the main system (spec Section 8) has not been

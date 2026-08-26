@@ -278,12 +278,20 @@ async function apiFetch(url, options = {}) {
 const MONTHS = {
   january: 1, february: 2, march: 3, april: 4, may: 5, june: 6, july: 7,
   august: 8, september: 9, october: 10, november: 11, december: 12,
+  // Common abbreviations seen in real reports (e.g. Calauag's "Aug",
+  // Infanta's "Aug." — alpha-test bugs #3/#5, client feedback
+  // 2026-08-25). The optional trailing "." is stripped by the date-part
+  // regexes below before this lookup runs, so only the bare abbreviation
+  // needs listing here.
+  jan: 1, feb: 2, mar: 3, apr: 4, jun: 6, jul: 7, aug: 8,
+  sep: 9, sept: 9, oct: 10, nov: 11, dec: 12,
 };
 
-// Each of these tries to split "<date stuff><separator><HHMMH>" one
-// specific way. Add more here as new report formats show up — none of
-// them replace each other, parseRoughDatetime tries them in order and
-// only gives up (leaves the picker blocked) if none match.
+// Each of these tries to split "<date stuff><separator><time token>" one
+// specific way (a few try the reverse order — time first). Add more here
+// as new report formats show up — none of them replace each other,
+// parseRoughDatetime tries them all in order and only gives up (leaves
+// the picker blocked) if none match.
 function splitDateTime_Pipe(trimmed) {
   // "February 11, 2026 | 0900H"
   const m = trimmed.match(/^(.*?)\|\s*(\d{3,4})H?\s*$/i);
@@ -298,6 +306,41 @@ function splitDateTime_Comma(trimmed) {
   return m ? { datePart: m[1].trim(), timeToken: m[2] } : null;
 }
 
+function splitDateTime_Slash(trimmed) {
+  // "Aug. 25, 2026/1016H" (Infanta — alpha-test bug #5). Same greedy-
+  // backtracking trick as splitDateTime_Comma, just on "/" instead.
+  const m = trimmed.match(/^(.*?)\/\s*(\d{3,4})H?\s*$/i);
+  return m ? { datePart: m[1].trim(), timeToken: m[2] } : null;
+}
+
+function splitDateTime_MilitaryTimeFirst(trimmed) {
+  // "2306H August 24, 2026" (Pagbilao — alpha-test bug #3): the AI read
+  // the raw string correctly (shown in the "AI read:" hint), but every
+  // splitter above assumes the date comes first — this is the same
+  // military-time token, just leading instead of trailing.
+  const m = trimmed.match(/^(\d{3,4})H\s+(.+)$/i);
+  return m ? { datePart: m[2].trim(), timeToken: m[1] } : null;
+}
+
+function _hhmmFrom12Hour(hourStr, minuteStr, ampm) {
+  let hh = parseInt(hourStr, 10);
+  const mm = parseInt(minuteStr, 10);
+  if (hh < 1 || hh > 12 || mm > 59) return null;
+  const isPM = /pm/i.test(ampm);
+  if (hh === 12) hh = isPM ? 12 : 0; // 12:00am -> 00:xx, 12:00pm -> 12:xx
+  else if (isPM) hh += 12;
+  return `${String(hh).padStart(2, "0")}${String(mm).padStart(2, "0")}`;
+}
+
+function splitDateTime_12HourTimeFirst(trimmed) {
+  // "12:00am Aug 25 2026" (Calauag — alpha-test bug #3): time first
+  // again, but 12-hour clock with am/pm instead of military time.
+  const m = trimmed.match(/^(\d{1,2}):(\d{2})\s*([ap]m)\s+(.+)$/i);
+  if (!m) return null;
+  const timeToken = _hhmmFrom12Hour(m[1], m[2], m[3]);
+  return timeToken ? { datePart: m[4].trim(), timeToken } : null;
+}
+
 function parseRoughDatetime(raw) {
   if (!raw || typeof raw !== "string") return null;
   const trimmed = raw.trim();
@@ -306,7 +349,12 @@ function parseRoughDatetime(raw) {
   const iso = trimmed.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})/);
   if (iso) return iso[1];
 
-  const split = splitDateTime_Pipe(trimmed) || splitDateTime_Comma(trimmed);
+  const split =
+    splitDateTime_Pipe(trimmed) ||
+    splitDateTime_Comma(trimmed) ||
+    splitDateTime_Slash(trimmed) ||
+    splitDateTime_MilitaryTimeFirst(trimmed) ||
+    splitDateTime_12HourTimeFirst(trimmed);
   // No recognized time portion at all -> nothing to safely default to.
   // (Pre-existing bug, not introduced by the comma-format addition: this
   // used to fall through and silently default to 00:00, which is exactly
@@ -315,14 +363,17 @@ function parseRoughDatetime(raw) {
   const datePart = split.datePart;
   const timeToken = split.timeToken.padStart(4, "0");
 
+  // \.?  after the month allows an abbreviation with a trailing period
+  // ("Aug.", "Sept.") alongside the full name — both look up the same in
+  // MONTHS since the period itself is consumed here, never passed on.
   let year, month, day;
-  let m = datePart.match(/^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})$/);
+  let m = datePart.match(/^([A-Za-z]+)\.?\s+(\d{1,2}),?\s+(\d{4})$/);
   if (m) {
     month = MONTHS[m[1].toLowerCase()];
     day = parseInt(m[2], 10);
     year = parseInt(m[3], 10);
   } else {
-    m = datePart.match(/^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$/);
+    m = datePart.match(/^(\d{1,2})\s+([A-Za-z]+)\.?\s+(\d{4})$/);
     if (m) {
       day = parseInt(m[1], 10);
       month = MONTHS[m[2].toLowerCase()];
