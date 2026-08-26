@@ -201,13 +201,26 @@ built-in auth views), `/admin/`.
 
 ## The Batch Cycle
 
-A day splits into two 12-hour windows: AM (overnight 6:00 AM–6:00 PM
-compiled as the "0600H" report) and PM (daytime 6:00 AM–6:00 PM compiled
-as "1800H") — `current_batch`'s no-param path uses a simple wall-clock
-check (noon) against `timezone.localtime(now())`, independent of the
-main system's own period logic. `get_or_create` never touches an
-existing batch's status, so a `FINALIZED` batch can't be silently
-reopened by someone loading the page later in the same window.
+A day splits into two 12-hour windows, bounded by **6:00 AM and
+6:00 PM** — PM (daytime, 6AM–6PM) is dated today and released as the
+"1800H" report; AM (overnight, 6PM–6AM) is dated whichever calendar day
+its "0600H" report gets released on, so the date rolls forward at 6PM
+and stays put across midnight. `current_batch`'s no-param path computes
+this via `_current_batch_slot()` against `timezone.localtime(now())`,
+independent of the main system's own period logic. `get_or_create` never
+touches an existing batch's status, so a `FINALIZED` batch can't be
+silently reopened by someone loading the page later in the same window.
+
+**Fixed 2026-08-25 (client alpha-test bug #1):** this used to check
+`hour < 12` (a leftover noon/midnight split, same shape as the main
+system's own `_get_or_create_current_period()`), which left a
+`FINALIZED` AM batch showing as "current" for a full 6 hours after
+6:00 AM — blocking all new submissions for the whole office during that
+gap, since it looked locked with nowhere to submit into. Not a
+UTC-vs-local bug (the caller already converts via `timezone.localtime()`
+first) — just the wrong boundary constant. See `_current_batch_slot()`
+in `views.py` and its tests in `tests.py` for the corrected 6/18
+boundary and the date-rollover logic for the overnight window.
 
 **Batch History** (`/history/`) lists every batch ever created, most
 recent first, regardless of whether its window has closed, with an

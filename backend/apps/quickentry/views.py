@@ -4,6 +4,8 @@ Section 6. PDF compilation (Step 6) isn't built yet — finalize/download
 are stubbed accordingly.
 """
 
+from datetime import timedelta
+
 from django.contrib.auth.decorators import login_required
 from django.db import transaction
 from django.db.models import Count
@@ -138,17 +140,49 @@ def ai_status(request):
 
 
 # ── GET /api/current-batch/ ────────────────────────────────────────────
+def _current_batch_slot(now_local):
+    """
+    Maps a tz-aware, ALREADY-LOCALIZED (Asia/Manila) datetime to the
+    (date, shift) of the batch window it falls into.
+
+    Real PDRRMO SitRep convention, confirmed against client feedback
+    (alpha test, 2026-08-25 — see CLAUDE.md Known Gaps history): the two
+    12-hour windows are bounded by 6:00 AM and 6:00 PM, not midnight and
+    noon. A prior version of this function checked `hour < 12`, which
+    doesn't flip until noon — the batch was still showing as the AM
+    window for a full 6 hours after 6:00 AM, blocking new submissions
+    for the whole client office during that gap. That bug was NOT a
+    UTC-vs-local mixup (the caller already converts via
+    timezone.localtime() before calling this) — it was simply the wrong
+    boundary constant.
+
+    - 06:00–17:59 -> PM window (daytime), released as the "1800H"
+      report, dated today.
+    - 18:00–23:59 -> AM window (overnight), building toward TOMORROW
+      morning's "0600H" report — dated tomorrow, since that's the date
+      the eventual report carries.
+    - 00:00–05:59 -> AM window (overnight), finishing last night's
+      window that started before midnight — dated today, same
+      reasoning (this is the morning the "0600H" report it belongs to
+      actually gets released).
+    """
+    hour = now_local.hour
+    if 6 <= hour < 18:
+        return now_local.date(), ManualBatch.Shift.PM
+    if hour < 6:
+        return now_local.date(), ManualBatch.Shift.AM
+    return now_local.date() + timedelta(days=1), ManualBatch.Shift.AM
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def current_batch(request):
     """
-    No ?batch_id= — simple wall-clock check, independent of the main
-    system's period logic (and of the reopen-bug found there): noon
-    splits the day into the AM batch (overnight 6PM–6AM, compiled as the
-    "0600H" report) and the PM batch (daytime 6AM–6PM, compiled as the
-    "1800H" report). get_or_create never touches an existing batch's
-    status, so a FINALIZED batch can never get silently reopened by
-    someone loading this page later in the same window.
+    No ?batch_id= — simple wall-clock check via _current_batch_slot(),
+    independent of the main system's period logic (and of the
+    reopen-bug found there). get_or_create never touches an existing
+    batch's status, so a FINALIZED batch can never get silently
+    reopened by someone loading this page later in the same window.
 
     With ?batch_id= — Batch History's "Open" link for a DRAFT batch that
     isn't today's current-shift one (e.g. its window has passed but it
@@ -161,10 +195,10 @@ def current_batch(request):
         batch = get_object_or_404(ManualBatch, pk=batch_id)
     else:
         now = timezone.localtime(timezone.now())
-        shift = ManualBatch.Shift.AM if now.hour < 12 else ManualBatch.Shift.PM
+        batch_date, shift = _current_batch_slot(now)
 
         batch, _created = ManualBatch.objects.get_or_create(
-            date=now.date(),
+            date=batch_date,
             shift=shift,
             defaults={"status": ManualBatch.Status.DRAFT},
         )
