@@ -147,25 +147,45 @@ class ManualBatch(models.Model):
         moves forward past amended_at) while still leaving the permanent
         amended_at/amendment_reason record in place for the PDF note.
 
-        Also requires amend_eligible() (last-5-period restriction — see
-        views.amend_eligible): an amended-but-not-yet-refinalized batch
+        Also requires amend_eligible (last-5-period restriction — see
+        that property below): an amended-but-not-yet-refinalized batch
         stays unlocked only while it's still within that window. Once a
         later batch's finalize pushes it out, this property starts
         returning True (locked) automatically the next time anything
         evaluates it — no explicit "re-lock" action, snapshot, or
         rollback anywhere; same lazy-evaluation spirit as
-        _current_batch_slot()/amend_eligible() themselves. Imported
-        locally (not at module level) to avoid a circular import —
-        views.py already imports from this module, and amend_eligible()
-        lives there, same place _current_batch_slot() does.
+        _current_batch_slot()/amend_eligible themselves.
         """
         if self.status != self.Status.FINALIZED:
             return False
         if self.amended_at and self.amended_at > self.finalized_at:
-            from .views import amend_eligible
-
-            return not amend_eligible(self)
+            return not self.amend_eligible
         return True
+
+    @property
+    def amend_eligible(self):
+        """
+        Whether this batch can currently be Amended — delegates to
+        views.amend_eligible() (see that function for the full
+        last-5-period-window/grandfather-cutoff logic). Exposed as a
+        model property, not just a view-layer function, so
+        ManualBatchSerializer, is_locked above, and any template
+        (Batch History uses {{ batch.amend_eligible }}) all share the
+        one implementation rather than three that could drift.
+
+        Only meaningful for a FINALIZED batch — views.amend_eligible()
+        already returns False for anything else (a DRAFT batch can't be
+        amended in the first place), so that's what this returns too;
+        never null, per the API contract.
+
+        Imported locally (not at module level) to avoid a circular
+        import — views.py already imports from this module, and
+        amend_eligible() lives there, same place _current_batch_slot()
+        does.
+        """
+        from .views import amend_eligible as _amend_eligible
+
+        return _amend_eligible(self)
 
 
 class BatchAmendment(models.Model):

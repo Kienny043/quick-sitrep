@@ -60,11 +60,16 @@ class ManualBatchSerializer(serializers.ModelSerializer):
     # same "one implementation, not two that could drift" reasoning as
     # compute_summary()/get_incident_schema() elsewhere in this app.
     is_locked = serializers.BooleanField(read_only=True)
+    # Same reasoning, for the last-5-period amend-restriction window —
+    # lets the frontend show/hide the Amend button without re-deriving
+    # the cutoff/window logic itself. Always a real boolean (False for a
+    # DRAFT batch, never null) — see ManualBatch.amend_eligible.
+    amend_eligible = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = ManualBatch
         fields = [
-            "id", "date", "shift", "status", "is_locked",
+            "id", "date", "shift", "status", "is_locked", "amend_eligible",
             "finalized_at", "finalized_by",
             "amended_at", "amended_by", "amendment_reason",
             # Included so an amended (reopened) batch's finalize form can

@@ -414,3 +414,72 @@ class AmendEndpointTests(TestCase):
         batch.refresh_from_db()
         self.assertEqual(batch.amendment_reason, "Second correction, found something else")
         self.assertEqual(batch.amended_at, rows[1].amended_at)
+
+
+class AmendEligibleFieldExposureTests(TestCase):
+    """
+    Step 4: amend_eligible surfaced as ManualBatch.amend_eligible (a
+    property backing both ManualBatchSerializer's field and, for free,
+    Batch History's template access via {{ batch.amend_eligible }} --
+    same one-implementation reasoning as is_locked) and confirmed in the
+    actual current-batch API response, not just the bare property.
+    """
+
+    CUTOFF = settings.AMEND_RESTRICTION_CUTOFF
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+
+        self.user = get_user_model().objects.create_user(
+            username="expose_test_user", password="testpass123!"
+        )
+        self.client.force_login(self.user)
+
+    def _make(self, d, shift, finalized_at, status_=ManualBatch.Status.FINALIZED):
+        return ManualBatch.objects.create(
+            date=d, shift=shift, status=status_, finalized_at=finalized_at,
+        )
+
+    def test_grandfathered_pre_cutoff_batch_is_eligible(self):
+        batch = self._make(
+            self.CUTOFF.date() - timedelta(days=10), ManualBatch.Shift.AM,
+            self.CUTOFF - timedelta(days=10),
+        )
+        self.assertIs(batch.amend_eligible, True)
+
+        response = self.client.get(f"/api/current-batch/?batch_id={batch.id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertIs(response.json()["batch"]["amend_eligible"], True)
+
+    def test_post_cutoff_batch_within_window_is_eligible(self):
+        batch = self._make(self.CUTOFF.date(), ManualBatch.Shift.AM, self.CUTOFF + timedelta(hours=1))
+        self.assertIs(batch.amend_eligible, True)
+
+        response = self.client.get(f"/api/current-batch/?batch_id={batch.id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertIs(response.json()["batch"]["amend_eligible"], True)
+
+    def test_post_cutoff_batch_pushed_out_of_window_is_ineligible(self):
+        periods = list(_sequential_periods(self.CUTOFF.date(), 6))
+        batches = [
+            self._make(d, shift, self.CUTOFF + timedelta(hours=i))
+            for i, (d, shift) in enumerate(periods)
+        ]
+        oldest, newest = batches[0], batches[-1]
+
+        self.assertIs(oldest.amend_eligible, False)
+        self.assertIs(newest.amend_eligible, True)
+
+        response = self.client.get(f"/api/current-batch/?batch_id={oldest.id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertIs(response.json()["batch"]["amend_eligible"], False)
+
+    def test_draft_batch_amend_eligible_is_false_not_null(self):
+        # DRAFT batches can't be amended at all -- amend_eligible must
+        # read as a real False here, never null, per the API contract.
+        draft = ManualBatch.objects.create(date=date(2026, 1, 1), shift=ManualBatch.Shift.AM)
+        self.assertIs(draft.amend_eligible, False)
+
+        response = self.client.get(f"/api/current-batch/?batch_id={draft.id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertIs(response.json()["batch"]["amend_eligible"], False)
