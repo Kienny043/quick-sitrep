@@ -41,12 +41,38 @@ MAX_NETWORK_ATTEMPTS = 2
 NETWORK_RETRY_BACKOFF_SECONDS = 1
 
 # Hard cap on completion tokens per call — also doubles as the proactive
-# rate-limit safety margin below (it's the single largest, most variable
-# cost component of a call; the system prompt itself is fixed and
-# comparatively small — confirmed at ~2804 prompt tokens via Groq's own
-# `usage` field on a real call, not a chars/4 guess, which undercounts
-# for this JSON-schema-heavy prompt).
-MAX_TOKENS = 4096
+# rate-limit safety margin below.
+#
+# Reduced from 4096 to 2500 on 2026-08-27 (client report: a real, plain-
+# text municipal report — Lucban MDRRMO, no decorative Unicode, nothing
+# unusual — looped/failed on "Process with AI" while short gibberish
+# succeeded). Diagnosed with real data, not a guess: measured
+# completion_tokens (Groq's own `usage` field, not estimated) across 6
+# diverse real reports — single/multi-incident, a fatality, weather-only,
+# the long Lucban one — ranged 583–1873, max 1873 (Lucban itself). 2500
+# keeps ~33% margin above that observed max (openai/gpt-oss-120b is a
+# reasoning model — completion_tokens includes reasoning tokens from the
+# SAME budget the final JSON comes out of, so this needs real headroom,
+# not just "big enough for the JSON").
+#
+# Why the OLD 4096 caused this: Groq's free-tier TPM (tokens-per-minute)
+# pre-check rejects a request (413, code "rate_limit_exceeded") whenever
+# Requested > Limit, and empirically, for this app, Requested =
+# prompt_tokens + max_tokens exactly (confirmed against two real 413
+# bodies: 4442+4096=8538 and 3953+4096=8049, both exact matches). The
+# system prompt's own real baseline is ~3945-3990 prompt_tokens (see
+# CLAUDE.md's AI Extraction section for why that's notably higher than
+# this file's own prompt used to measure at) — so at max_tokens=4096,
+# baseline overhead ALONE (~3945 + 4096 = ~8041) was already at or past
+# the 8000 limit before a single character of user input was counted.
+# This was never really "some reports are too long" — the app's own
+# fixed cost was eating essentially the entire budget by itself.
+#
+# Do NOT bump this back up to "be safe" without re-measuring real
+# completion_tokens first (see the diagnosis this comment summarizes) —
+# a larger number here directly shrinks how much input headroom real
+# reports have under the 8000 TPM ceiling, per the Requested formula above.
+MAX_TOKENS = 2500
 
 
 class ExtractionError(Exception):
@@ -441,8 +467,14 @@ quotation marks around it."""
 # (WEB_CONCURRENCY=1), which is precisely why nothing here may block it.
 #
 # TOKEN_COOLDOWN_THRESHOLD = MAX_TOKENS is empirically validated in this
-# repo: a real call attempted with 3815 tokens remaining (< 4096) hit a
-# 429; one attempted with 7917 remaining (> 4096) succeeded.
+# repo (against the original MAX_TOKENS=4096): a real call attempted with
+# 3815 tokens remaining (< 4096) hit a 429; one attempted with 7917
+# remaining (> 4096) succeeded. Tying it to MAX_TOKENS rather than a
+# separate constant means this threshold automatically tracks whatever
+# MAX_TOKENS actually is (now 2500 — see that constant's own comment) —
+# the mechanism being validated (refuse proactively when remaining budget
+# is less than what THIS call would need to reserve) doesn't change with
+# the number, only the specific figures cited above do.
 TOKEN_COOLDOWN_THRESHOLD = MAX_TOKENS
 
 # Sanity ceiling on the STORED/reported cooldown — guards only against a

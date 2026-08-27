@@ -271,10 +271,24 @@ only one counting implementation, not two that could drift apart.
   404s on `GET /openai/v1/models`. Worth fixing there too when that gets
   picked back up.
 - JSON mode (`response_format: {"type": "json_object"}`), `temperature`
-  0.1, `max_tokens` 4096, one large system prompt with label aliases,
-  extraction rules, and few-shot examples (road crash x2, fire incident,
-  water incident/weather). Separate, shorter prose prompts (not JSON
-  mode) power `generate_synopsis()`/`generate_weather_summary()`.
+  0.1, `max_tokens` **2500** (see `MAX_TOKENS`'s own comment in `ai.py`
+  for the full derivation — reduced from 4096 on 2026-08-27), one large
+  system prompt with label aliases, extraction rules, and few-shot
+  examples (road crash x2, fire incident, water incident/weather).
+  Separate, shorter prose prompts (not JSON mode) power
+  `generate_synopsis()`/`generate_weather_summary()`.
+  **The system prompt's own real measured baseline is ~3945-3990
+  `prompt_tokens`** (Groq's own `usage` field on a real call, not a
+  chars/4 guess — confirmed across 6 diverse real reports; barely moves
+  with report length, since the fixed system prompt dominates it). This
+  is notably higher than an earlier ~2804-token figure once documented
+  here — that was stale, predating several real-bug-driven prompt
+  additions made since (the `RESPONDING TEAM`/`RESPONDERS` alias fix, the
+  broadened `unmapped_notes` rule, `weather_condition`'s anti-inference
+  rule, the injury-classification group rule). Re-measure before trusting
+  either number if the prompt changes again — see "Every Groq-side
+  failure becomes ExtractionError" below for why this number matters
+  beyond documentation accuracy.
 - **`RESPONDING TEAM` vs. `RESPONDERS` are NOT aliases of each other** —
   a real report often states both (the team's name, then who was on it).
   The system prompt calls this out explicitly after a real extraction
@@ -339,7 +353,7 @@ request-handling path may sleep to wait out a rate limit.** Instead:
   this handler, that data silently vanishes below WARNING, which is
   exactly what made the 56-minute incident hard to diagnose the first
   time).
-- If remaining tokens drop below `MAX_TOKENS` (4096), the next call for
+- If remaining tokens drop below `MAX_TOKENS` (2500), the next call for
   that key is refused immediately with `RateLimitedError` — never
   attempted, never slept out.
 - A live 429 also raises `RateLimitedError` immediately (after recording
@@ -402,6 +416,37 @@ addresses the length side of the symptom: decorative Unicode code
 points often cost several tokens each under the model's tokenizer
 versus one for the plain letter they represent, so normalizing reduces
 token cost too, not just visual styling.
+
+### `MAX_TOKENS` reduced 4096 → 2500 (2026-08-27) — a different root cause than bug #4
+
+Found via a real report with **zero decorative Unicode** (a genuinely
+plain, moderate-length Lucban MDRRMO report) that 413'd identically on
+every retry — confirmed via real data that this is a *deterministic*
+per-request overage, not contention: the 413 arrived with
+`x-ratelimit-remaining-tokens: '8000'` (the full budget, freshly reset,
+nothing else competing for it) and still rejected the request. Bug #4's
+fix (NFKC normalization) doesn't touch this case at all, since there's
+no decorative Unicode to fold.
+
+Derived the exact relationship Groq's TPM pre-check uses from two real
+413 bodies: **`Requested = prompt_tokens + max_tokens`**, exactly (not
+an estimate — confirmed to the token: `4442 + 4096 = 8538` and
+`3953 + 4096 = 8049`, both exact matches against Groq's own reported
+`Requested` figure). Combined with the system prompt's real ~3945-3990
+`prompt_tokens` baseline (see AI Extraction above), the *old*
+`MAX_TOKENS = 4096` meant fixed overhead alone (~3945 + 4096 ≈ 8041) was
+already at or past the 8000 limit before counting a single character of
+user input — this was never really "some reports are too long," it was
+the app's own fixed cost nearly saturating the budget by itself.
+
+Fix: measured real `completion_tokens` (Groq's own `usage` field, not
+estimated) across 6 diverse real reports — single/multi-incident, a
+fatality, weather-only, the long Lucban one — ranging 583-1873, max
+1873. `MAX_TOKENS` is now **2500**, ~33% above that observed max. See
+`MAX_TOKENS`'s own comment in `ai.py` for the full numbers — **don't
+raise it back up without re-measuring real `completion_tokens` first**;
+per the `Requested` formula above, every token added here directly
+shrinks how much real input headroom reports have under the 8000 ceiling.
 
 ### Fallback key (`GROQ_API_KEY_FALLBACK`, optional)
 
