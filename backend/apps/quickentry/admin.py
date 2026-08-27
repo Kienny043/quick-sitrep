@@ -2,6 +2,7 @@ from django.contrib import admin
 
 from .models import (
     ManualBatch,
+    BatchAmendment,
     ManualEntry,
     RoadCrash,
     RoadCrashVictim,
@@ -19,6 +20,25 @@ class ManualBatchAdmin(admin.ModelAdmin):
     list_display = ("date", "shift", "status", "finalized_at", "finalized_by")
     list_filter = ("status", "shift")
     ordering = ("-date", "-shift")
+
+
+@admin.register(BatchAmendment)
+class BatchAmendmentAdmin(admin.ModelAdmin):
+    # Read-only visibility into the append-only log -- no add/change/delete
+    # from admin either, since the whole point is that it's never edited
+    # or removed once written (see the model's own docstring).
+    list_display = ("batch", "amended_by", "amended_at")
+    list_filter = ("batch",)
+    ordering = ("-amended_at",)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 class RoadCrashVictimInline(admin.TabularInline):

@@ -8,7 +8,9 @@ why this matters (a hardcoded-secrets regression was found there).
 """
 
 import os
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 import dj_database_url
 
@@ -151,6 +153,25 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 # model (Step 12, /settings/ page) — see apps/quickentry/models.py.
 # Removed the hardcoded constants that used to live here so there's only
 # one source of truth.
+
+# ── Amendment restriction cutoff (BatchAmendment feature) ──────────────
+# A batch finalized BEFORE this moment is grandfathered forever (the old
+# unlimited-amend behavior, never subject to the 5-period window); a
+# batch finalized AT/AFTER this moment is subject to it. See
+# apps.quickentry.views.amend_eligible() / ManualBatch for the full
+# eligibility logic, and CLAUDE.md for why this exists.
+#
+# Deliberately a literal, one-time value — set to the moment this
+# feature shipped, chosen (over backdating it) so nothing already
+# amendable today loses that capability out from under OPS mid-use; the
+# 5-period window only starts counting from the first batch finalized
+# after this line, and has no visible effect until 5 such batches exist
+# (roughly a few days at this office's ~2 batches/day volume). Must
+# NEVER be moved forward after the fact — that would silently grandfather
+# batches that were already subject to the restriction. If this ever
+# needs to change, that's a new, deliberate product decision, not a
+# routine settings edit.
+AMEND_RESTRICTION_CUTOFF = datetime(2026, 8, 27, 0, 0, tzinfo=ZoneInfo("Asia/Manila"))
 
 # Without this, apps.quickentry.ai's logger (used to log Groq's raw
 # rate-limit headers on every call — see ai._record_rate_limit) has no

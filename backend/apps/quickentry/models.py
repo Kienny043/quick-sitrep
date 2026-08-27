@@ -154,6 +154,46 @@ class ManualBatch(models.Model):
         return True
 
 
+class BatchAmendment(models.Model):
+    """
+    Append-only amendment log — one row per Amend action, never
+    overwritten or deleted. Unbounded on purpose (no cap, no pruning):
+    this office does at most ~2 batches/day, so the table stays trivially
+    small, and silently discarding an amendment's history would violate
+    the same accountability principle raw_text/ai_output already follow
+    elsewhere in this app.
+
+    ManualBatch.amended_at/amended_by/amendment_reason remain a
+    denormalized "latest amendment" cache alongside this log — every
+    Amend action writes both, from the same timestamp, so they never
+    drift. The cache fields exist purely so PDF generation (which only
+    ever needs the latest note) doesn't have to query this table; this
+    table exists purely so a full history is never lost. See
+    views.amend_batch.
+    """
+
+    batch = models.ForeignKey(
+        ManualBatch, on_delete=models.CASCADE, related_name="amendment_log"
+    )
+    amended_by = models.ForeignKey(
+        AUTH_USER,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="batch_amendments",
+    )
+    amended_at = models.DateTimeField()
+    amendment_reason = models.TextField()
+
+    class Meta:
+        ordering = ["amended_at", "id"]
+        verbose_name = "Batch Amendment"
+        verbose_name_plural = "Batch Amendments"
+
+    def __str__(self):
+        return f"Amendment of {self.batch} at {self.amended_at:%Y-%m-%d %H:%M}"
+
+
 class ManualEntry(models.Model):
     class Status(models.TextChoices):
         PENDING = "PENDING", "Pending"
