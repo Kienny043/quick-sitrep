@@ -6,6 +6,7 @@ are stubbed accordingly.
 
 from datetime import timedelta
 
+from django.conf import settings
 from django.contrib.auth.decorators import login_required
 from django.db import transaction
 from django.db.models import Count
@@ -513,6 +514,65 @@ def generate_weather_view(request, pk):
     except ExtractionError as exc:
         return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
     return Response({"weather_condition": weather})
+
+
+# ── Amend eligibility (last-5-period restriction) ──────────────────────
+# Shift.choices values happen to sort "AM" < "PM" alphabetically too, but
+# that's coincidental, not the reason AM comes first -- it's because the
+# 0600H (AM) period is released before the same date's 1800H (PM) period.
+# Relying on the alphabetical accident would silently break if the shift
+# codes ever changed; this key is explicit instead. Not exported/used
+# elsewhere yet, but same pattern as _current_batch_slot() above: a
+# small, independently testable pure function.
+_SHIFT_PERIOD_ORDER = {ManualBatch.Shift.AM: 0, ManualBatch.Shift.PM: 1}
+
+
+def _period_sort_key(batch):
+    """
+    Chronological key for a batch's own (date, shift) PERIOD identity --
+    deliberately NOT batch.finalized_at. A batch can be finalized out of
+    period order (e.g. OPS catches up on a missed period via Batch
+    History days later), but amend_eligible() below must still rank "the
+    5 most recent periods" by the period each batch actually represents,
+    not by when the Finalize button happened to be pressed.
+    """
+    return (batch.date, _SHIFT_PERIOD_ORDER[batch.shift])
+
+
+def amend_eligible(batch):
+    """
+    Whether `batch` can currently be Amended. Fully lazy/derived, same
+    spirit as _current_batch_slot(): no scheduled job, no explicit
+    "lock" mutation anywhere. The moment a 6th post-cutoff batch
+    finalizes and pushes an older one out of the window, that older
+    batch's eligibility simply evaluates to False the next time this
+    runs -- nothing has to notice or act on the transition.
+
+    1. Only a FINALIZED batch can ever be eligible.
+    2. A batch finalized before AMEND_RESTRICTION_CUTOFF is grandfathered
+       -- always eligible, and does not occupy one of the 5 window slots
+       for anyone else (see the exclusion in the query below).
+    3. Otherwise, eligible only if `batch` is among the 5 most-recently-
+       finalized batches whose finalized_at falls at/after the cutoff,
+       ranked by _period_sort_key (period identity), not finalized_at.
+    """
+    if batch.status != ManualBatch.Status.FINALIZED or batch.finalized_at is None:
+        return False
+
+    cutoff = settings.AMEND_RESTRICTION_CUTOFF
+    if batch.finalized_at < cutoff:
+        return True
+
+    # Small by construction (this office finalizes at most ~2 batches/day
+    # -- see BatchAmendment's own docstring), so ranking in Python rather
+    # than via a database-side CASE/WHEN on shift is simpler and just as
+    # cheap in practice.
+    post_cutoff = ManualBatch.objects.filter(
+        status=ManualBatch.Status.FINALIZED,
+        finalized_at__gte=cutoff,
+    )
+    most_recent_five = sorted(post_cutoff, key=_period_sort_key, reverse=True)[:5]
+    return batch.id in {b.id for b in most_recent_five}
 
 
 # ── POST /api/batches/<id>/amend/ ───────────────────────────────────────

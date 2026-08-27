@@ -1,8 +1,9 @@
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+from django.conf import settings
 from django.test import SimpleTestCase, TestCase
 from requests.structures import CaseInsensitiveDict
 
@@ -14,7 +15,7 @@ from apps.quickentry.ai import (
     _post_with_retry,
 )
 from apps.quickentry.models import ManualBatch
-from apps.quickentry.views import _current_batch_slot
+from apps.quickentry.views import _current_batch_slot, _period_sort_key, amend_eligible
 
 MANILA = ZoneInfo("Asia/Manila")
 
@@ -202,3 +203,116 @@ class DecorativeUnicodeNormalizationTests(SimpleTestCase):
     def test_plain_ascii_report_is_unchanged(self):
         text = "WHAT: Road Crash\nWHEN: February 10, 2026 | 1400H\nWHERE: Brgy. Test"
         self.assertEqual(_normalize_decorative_unicode(text), text)
+
+
+def _sequential_periods(start_date, count):
+    """(date, shift) pairs in strict period order: AM, PM, AM, PM, ...
+    starting at start_date's AM window. Used so tests never have to hand-
+    pick dates and can't accidentally collide with ManualBatch's
+    unique_together=(date, shift)."""
+    d = start_date
+    shift = ManualBatch.Shift.AM
+    for _ in range(count):
+        yield (d, shift)
+        if shift == ManualBatch.Shift.AM:
+            shift = ManualBatch.Shift.PM
+        else:
+            shift = ManualBatch.Shift.AM
+            d = d + timedelta(days=1)
+
+
+class AmendEligibleTests(TestCase):
+    """
+    Last-5-period amend-restriction eligibility. Dates are built relative
+    to settings.AMEND_RESTRICTION_CUTOFF (not hardcoded) so these stay
+    correct if the cutoff value is ever revisited.
+    """
+
+    CUTOFF = settings.AMEND_RESTRICTION_CUTOFF
+
+    def _make(self, d, shift, finalized_at):
+        return ManualBatch.objects.create(
+            date=d, shift=shift, status=ManualBatch.Status.FINALIZED,
+            finalized_at=finalized_at,
+        )
+
+    def test_period_sort_key_orders_chronologically_not_alphabetically(self):
+        # Deliberately NOT relying on "AM" < "PM" string comparison --
+        # spans two dates so a same-date AM/PM mixup or a date/shift
+        # priority mixup would both be caught.
+        aug_n_pm = ManualBatch(date=date(2026, 1, 10), shift=ManualBatch.Shift.PM)
+        aug_n1_am = ManualBatch(date=date(2026, 1, 11), shift=ManualBatch.Shift.AM)
+        aug_n1_pm = ManualBatch(date=date(2026, 1, 11), shift=ManualBatch.Shift.PM)
+        ordered = sorted([aug_n1_pm, aug_n_pm, aug_n1_am], key=_period_sort_key)
+        self.assertEqual(
+            [(b.date, b.shift) for b in ordered],
+            [(date(2026, 1, 10), "PM"), (date(2026, 1, 11), "AM"), (date(2026, 1, 11), "PM")],
+        )
+
+    def test_non_finalized_batch_is_never_eligible(self):
+        draft = ManualBatch.objects.create(date=date(2026, 1, 1), shift=ManualBatch.Shift.AM)
+        self.assertFalse(amend_eligible(draft))
+
+    def test_pre_cutoff_batch_always_eligible_regardless_of_window_size(self):
+        grandfathered = self._make(
+            self.CUTOFF.date() - timedelta(days=30), ManualBatch.Shift.AM,
+            self.CUTOFF - timedelta(days=30),
+        )
+        # Finalize far more than 5 post-cutoff batches -- the grandfathered
+        # one must remain eligible no matter how the post-cutoff window
+        # fills up.
+        for d, shift in _sequential_periods(self.CUTOFF.date(), 10):
+            self._make(d, shift, self.CUTOFF + timedelta(hours=1))
+
+        self.assertTrue(amend_eligible(grandfathered))
+
+    def test_pre_cutoff_batches_do_not_consume_post_cutoff_window_slots(self):
+        pre_cutoff_batches = [
+            self._make(
+                self.CUTOFF.date() - timedelta(days=10 + i), ManualBatch.Shift.AM,
+                self.CUTOFF - timedelta(days=10 + i),
+            )
+            for i in range(3)
+        ]
+        # Exactly 5 post-cutoff batches -- if pre-cutoff batches wrongly
+        # ate window slots, some of these would incorrectly fall out.
+        post_cutoff_batches = [
+            self._make(d, shift, self.CUTOFF + timedelta(hours=1))
+            for d, shift in _sequential_periods(self.CUTOFF.date(), 5)
+        ]
+
+        for b in pre_cutoff_batches:
+            self.assertTrue(amend_eligible(b), f"pre-cutoff {b} should always be eligible")
+        for b in post_cutoff_batches:
+            self.assertTrue(amend_eligible(b), f"post-cutoff {b} should fit within the 5-slot window")
+
+    def test_sixth_post_cutoff_batch_pushes_the_oldest_period_out(self):
+        # Six post-cutoff PERIODS in strict chronological order p1..p6.
+        periods = list(_sequential_periods(self.CUTOFF.date(), 6))
+
+        # finalized_at is deliberately scrambled OUT of period order --
+        # p1 (the chronologically OLDEST period) is finalized LAST (as if
+        # OPS caught up on a missed period days later), while p2 is
+        # finalized right away. This is the real thing being tested:
+        # ranking must follow period identity (date, shift), never
+        # finalized_at wall-clock order -- if the implementation used
+        # finalized_at instead, p2 (not p1) would be the one pushed out.
+        finalized_ats = [
+            self.CUTOFF + timedelta(days=10),  # p1 -- finalized very late
+            self.CUTOFF + timedelta(hours=1),  # p2
+            self.CUTOFF + timedelta(hours=2),  # p3
+            self.CUTOFF + timedelta(hours=3),  # p4
+            self.CUTOFF + timedelta(hours=4),  # p5
+            self.CUTOFF + timedelta(hours=5),  # p6 -- newest period, finalized promptly
+        ]
+        batches = [
+            self._make(d, shift, fa)
+            for (d, shift), fa in zip(periods, finalized_ats)
+        ]
+
+        p1, p2, p3, p4, p5, p6 = batches
+        self.assertFalse(amend_eligible(p1), "oldest period must be pushed out by the 6th")
+        for b in (p2, p3, p4, p5, p6):
+            self.assertTrue(amend_eligible(b), f"{b} is among the 5 most recent periods")
+
+
