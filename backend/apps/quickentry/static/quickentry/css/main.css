@@ -93,7 +93,8 @@ h1, h2, h3, h4 { margin: 0 0 0.4em; font-weight: 700; }
 .alert-error { background: #fdecec; color: #991b1b; border: 1px solid #f5b5b5; }
 .alert-success { background: #ecfdf3; color: #15803d; border: 1px solid #a7e3bc; }
 .alert-warning { background: #fffaeb; color: #92400e; border: 1px solid #fbd38d; }
-.alert ul { margin: 0.3rem 0 0; padding-left: 1.1rem; }
+.alert ul, .alert ol { margin: 0.3rem 0 0; padding-left: 1.1rem; }
+.amendment-history li { margin: 0.15rem 0; }
 
 /* ── App shell ────────────────────────────────────────── */
 .topbar {

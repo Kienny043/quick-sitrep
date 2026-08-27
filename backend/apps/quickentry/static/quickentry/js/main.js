@@ -210,6 +210,7 @@ const state = {
   reopenedEntryId: null,   // set when the form was populated from a saved entry, not a fresh extract
   forceNewPaste: false,    // true after "Add Another Report" — show the paste box even though this municipality already has entries
   finalizeForm: { synopsis: "", weather_conditions: "", actions_taken: "" },
+  amendmentHistory: [], // every BatchAmendment row, oldest to newest -- see loadCurrentBatch()
 };
 
 // Backed by the server's is_locked (ManualBatch.is_locked — status ==
@@ -231,6 +232,7 @@ const API = {
   generateSynopsis: (id) => window.QUICKSITREP.endpoints.generateSynopsisTemplate.replace("999999", id),
   generateWeather: (id) => window.QUICKSITREP.endpoints.generateWeatherTemplate.replace("999999", id),
   amend: (id) => window.QUICKSITREP.endpoints.amendTemplate.replace("999999", id),
+  amendments: (id) => window.QUICKSITREP.endpoints.amendmentsTemplate.replace("999999", id),
 };
 
 // ── Small helpers ───────────────────────────────────────────────────
@@ -930,6 +932,32 @@ function handleAddAnotherReport() {
 }
 
 // ── Finalize & Generate PDF ──────────────────────────────────────
+// Full amendment history (Step 5's endpoint result, loaded in
+// loadCurrentBatch()) — replaces the old single "amended on <date>"
+// mention with every amendment, oldest to newest, who/when/reason. Empty
+// string (no section at all) when there's nothing to show, per the
+// "don't render an empty history section" requirement. Reused in both
+// renderFinalizePanel() branches below: a re-locked batch that was
+// amended in the past still has history worth showing, not just a
+// currently-unlocked one.
+function renderAmendmentHistory() {
+  const history = state.amendmentHistory || [];
+  if (!history.length) return "";
+
+  const items = history.map((a) => {
+    const who = a.amended_by ? escapeHtml(a.amended_by) : "Unknown user";
+    const when = escapeHtml(new Date(a.amended_at).toLocaleString());
+    return `<li><strong>${who}</strong> — ${when} — ${escapeHtml(a.amendment_reason)}</li>`;
+  }).join("");
+
+  return `
+    <div class="alert alert-warning amendment-history">
+      <strong>Amendment History</strong>
+      <ol>${items}</ol>
+    </div>
+  `;
+}
+
 function renderFinalizePanel() {
   const panel = document.getElementById("finalize-panel");
   const b = state.batch;
@@ -941,15 +969,25 @@ function renderFinalizePanel() {
 
   if (b.status === "FINALIZED" && b.is_locked) {
     const when = b.finalized_at ? new Date(b.finalized_at).toLocaleString() : "";
+    // Same amend_eligible field Batch History's Amend button already
+    // reads (Step 6) — front-loading the same 5-period-window
+    // information here too, so OPS doesn't fill out the whole reason
+    // form only to get a 403 on submit. The backend check (amend_batch)
+    // stays exactly as-is regardless — this is purely UI, not a
+    // replacement for that check.
+    const amendControl = b.amend_eligible
+      ? `<button type="button" id="amend-btn" class="btn btn-warning">Amend This Batch</button>`
+      : `<span class="history-locked-note" title="This period is outside the 5 most recent SitRep periods and can no longer be amended.">Locked — outside the last 5 periods</span>`;
     panel.innerHTML = `
       <h2>Finalize &amp; Generate PDF</h2>
       <div class="alert alert-success">
         This batch (${escapeHtml(b.date)} · ${escapeHtml(b.shift)}) was finalized${when ? " on " + escapeHtml(when) : ""}.
         No further entries can be added or edited for this batch.
       </div>
+      ${renderAmendmentHistory()}
       <div class="actions">
         <a class="btn btn-primary" href="${API.download(b.id)}" target="_blank" rel="noopener">Download PDF</a>
-        <button type="button" id="amend-btn" class="btn btn-warning">Amend This Batch</button>
+        ${amendControl}
       </div>
       <div id="amend-form-container"></div>
     `;
@@ -959,13 +997,14 @@ function renderFinalizePanel() {
   // Not locked: either a normal DRAFT batch, or a FINALIZED batch that
   // was amended more recently than it was last finalized (see
   // ManualBatch.is_locked) — same editable form either way, with a
-  // banner added on top for the amended case.
+  // banner (context) plus the full history added on top for the
+  // amended case.
   const amendedBanner = (b.status === "FINALIZED" && b.amended_at)
     ? `<div class="alert alert-warning">
-        This finalized batch was amended on ${escapeHtml(new Date(b.amended_at).toLocaleString())}
-        — you are editing the current version.
+        This finalized batch has been amended — you are editing the current version.
         <a href="${API.download(b.id)}" target="_blank" rel="noopener">Download the current PDF</a>
-      </div>`
+      </div>
+      ${renderAmendmentHistory()}`
     : "";
 
   panel.innerHTML = `
@@ -1059,6 +1098,11 @@ async function handleAmendSubmit() {
       weather_conditions: result.weather_conditions || "",
       actions_taken: result.actions_taken || "",
     };
+    // Refetch rather than optimistically append -- the amend response
+    // (ManualBatchSerializer) doesn't carry amended_by as a username the
+    // way the amendments endpoint does, and a refetch is cheap/correct
+    // either way.
+    state.amendmentHistory = await apiFetch(API.amendments(state.batch.id));
     renderChecklist();
     renderEntryPanel();
     renderFinalizePanel();
@@ -1680,6 +1724,13 @@ async function loadCurrentBatch() {
     weather_conditions: data.batch.weather_conditions || "",
     actions_taken: data.batch.actions_taken || "",
   };
+  // amended_at is never cleared once set (see ManualBatch's own docs),
+  // so it's a reliable "has this batch ever had at least one amendment"
+  // signal -- skips a network call for the common case of a batch
+  // that's never been amended at all.
+  state.amendmentHistory = (data.batch.status === "FINALIZED" && data.batch.amended_at)
+    ? await apiFetch(API.amendments(data.batch.id))
+    : [];
 }
 
 async function init() {
