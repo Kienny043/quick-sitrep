@@ -1322,6 +1322,19 @@ async function checkAiCooldown() {
   }
 }
 
+// Real incident (client alpha-test, local testing 2026-08-27): sustained
+// account-level Groq contention meant /api/ai-status/ kept reporting a
+// nonzero cooldown indefinitely. The old start() recursed on every
+// recheck with no cap, so it just kept re-arming the same countdown
+// forever, polling ai-status at whatever (often near-zero) interval the
+// server happened to report, with no backoff growth and no path that
+// ever gave up and told the user something was actually wrong. Confirmed
+// via a controlled reproduction: 9 ai-status polls in 20 real seconds,
+// zero progress, button stuck disabled forever.
+const MAX_COOLDOWN_RECHECKS = 4; // up to 4 rechecks past the first (5 checkAiCooldown calls total) before giving up
+const RECHECK_BACKOFF_BASE_SECONDS = 3;
+const RECHECK_BACKOFF_MAX_SECONDS = 60;
+
 function createCooldownController(getBtn, getNotice) {
   let timer = null;
 
@@ -1339,8 +1352,17 @@ function createCooldownController(getBtn, getNotice) {
   // buttons) to automatically retry the request that got rate-limited,
   // exactly once — the proactive, pre-click countdown (started after
   // every render from /api/ai-status/) never passes this, since nothing
-  // was actually attempted yet for it to retry.
-  function start(initialSeconds, onComplete) {
+  // was actually attempted yet for it to retry. This "exactly once"
+  // behavior is unaffected by recheckAttempt below — that's a separate
+  // cap on the recheck-the-server-clock loop, not on how many times the
+  // actual request itself gets retried (see attemptProcess's own
+  // allowAutoRetry flag for that).
+  //
+  // recheckAttempt: internal only — external callers never pass this, so
+  // it always starts at 0. Incremented on each "still not clear" recheck;
+  // once it reaches MAX_COOLDOWN_RECHECKS, this gives up instead of
+  // recursing again — see the hard-fail branch below.
+  function start(initialSeconds, onComplete, recheckAttempt = 0) {
     stop();
     let remaining = initialSeconds;
 
@@ -1356,16 +1378,38 @@ function createCooldownController(getBtn, getNotice) {
         // Re-check with the server rather than just trusting the local
         // clock — it was seeded from a real value, but only once.
         checkAiCooldown().then((secs) => {
-          if (secs > 0) {
-            start(secs, onComplete);
-          } else if (onComplete) {
-            onComplete();
-          } else {
+          if (secs <= 0) {
+            if (onComplete) {
+              onComplete();
+            } else {
+              const b = getBtn();
+              const n = getNotice();
+              if (b) b.disabled = false;
+              if (n) n.innerHTML = "";
+            }
+            return;
+          }
+          if (recheckAttempt >= MAX_COOLDOWN_RECHECKS) {
+            // Give up: a real, clear error instead of an endless silent
+            // loop. Button re-enabled so OPS isn't stuck.
             const b = getBtn();
             const n = getNotice();
             if (b) b.disabled = false;
-            if (n) n.innerHTML = "";
+            if (n) {
+              n.innerHTML = `<div class="alert alert-error">AI extraction is currently unavailable — please try again in a few minutes, or enter this report manually.</div>`;
+            }
+            return;
           }
+          // Modestly growing backoff between rechecks, not a flat
+          // interval tied purely to whatever (often near-zero) value the
+          // server happens to report — avoids hammering /api/ai-status/
+          // at a fast fixed cadence while the underlying condition isn't
+          // actually clearing.
+          const backoff = Math.min(
+            RECHECK_BACKOFF_MAX_SECONDS,
+            Math.max(secs, RECHECK_BACKOFF_BASE_SECONDS * Math.pow(2, recheckAttempt))
+          );
+          start(backoff, onComplete, recheckAttempt + 1);
         });
         return;
       }
