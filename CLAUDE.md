@@ -93,19 +93,24 @@ Frozen-at-finalize fields (see "PDF generation" below): `synopsis`,
 `noted_by_title`, `approved_by`, `approved_by_title`.
 `unique_together = (date, shift)`.
 
-Amendment fields — `amended_at`, `amended_by`, `amendment_reason`. Only
-the **latest** amendment is tracked, not a full append-only log (a
-deliberate scope call — a log wasn't "barely more effort" so it was
-skipped). The `is_locked` property is the single source of truth for
-"can this batch be edited right now" — comparing `amended_at >
-finalized_at` (timestamps), not a second open/closed flag or clearing
-`amended_at` on re-finalize. This means: amending a `FINALIZED` batch
-reopens it for editing without touching `status`, and re-finalizing
-naturally re-locks it (finalize bumps `finalized_at` past `amended_at`)
-while `amended_at`/`amendment_reason` stay set forever as a permanent
-audit marker — the PDF keeps showing "this report was amended" even
-after it's re-locked, same accountability spirit as `raw_text`/
-`ai_output` being frozen elsewhere.
+Amendment fields — `amended_at`, `amended_by`, `amendment_reason`. These
+are a **denormalized cache of the latest amendment only** — the full
+history now lives in `BatchAmendment` (see below and "Amendment
+Restriction Window"). The cache fields exist so PDF generation and the
+`is_locked` timestamp comparison don't need to query the log table; they
+are written from the exact same `timezone.now()` call as the
+`BatchAmendment` row on every amend, so the two can never drift apart.
+The `is_locked` property is the single source of truth for "can this
+batch be edited right now" — comparing `amended_at > finalized_at`
+(timestamps), not a second open/closed flag or clearing `amended_at` on
+re-finalize. This means: amending a `FINALIZED` batch reopens it for
+editing without touching `status`, and re-finalizing naturally re-locks
+it (finalize bumps `finalized_at` past `amended_at`) while
+`amended_at`/`amendment_reason` stay set forever as a permanent audit
+marker — the PDF keeps showing "this report was amended" even after
+it's re-locked, same accountability spirit as `raw_text`/`ai_output`
+being frozen elsewhere. `is_locked` also factors in `amend_eligible` now
+— see "Amendment Restriction Window" below.
 
 **`ManualEntry`** — one municipality's submission within a batch.
 `batch` FK, `municipality` (choice field, all 41 Quezon municipalities),
@@ -142,6 +147,15 @@ group by municipality rather than assuming one entry each.
 - `TraumaEmergency`
 - `LifelinesStatus` (`OneToOneField` to `ManualEntry`) — power/water/
   communication/road/sea status + notes, `class_suspension` boolean
+
+**`BatchAmendment`** — append-only amendment log, FK to `ManualBatch`.
+`amended_by`, `amended_at`, `amendment_reason`. One row per Amend
+action, **never overwritten or deleted, unbounded** (no cap, no
+pruning) — this office finalizes at most ~2 batches/day, so the table
+stays trivially small forever, and capping it would violate the same
+"never silently drop data" principle `raw_text`/`ai_output` already
+follow. Ordered oldest→newest. See "Amendment Restriction Window"
+below for the full design.
 
 **`SitRepSignatoryConfig`** — singleton (`get_config()` classmethod,
 `save()` guards against a 2nd row), same pattern as the main system's
@@ -180,7 +194,17 @@ constants anywhere else in the codebase.
   `weather_condition`, deduped, skipping entries that left it blank.
 - `POST /api/batches/<id>/amend/` — reopens an already-`FINALIZED` batch
   for editing (sets `amended_at`/`amended_by`/`amendment_reason`; see
-  `ManualBatch.is_locked` above). 400s if the batch isn't `FINALIZED`.
+  `ManualBatch.is_locked` above) **and** creates a `BatchAmendment` row
+  from the same timestamp. 400s if the batch isn't `FINALIZED`; **403s
+  if it's `FINALIZED` but not `amend_eligible`** (outside the 5-period
+  window and not grandfathered — see "Amendment Restriction Window").
+- `GET /api/batches/<id>/amendments/` — full amendment history for a
+  batch, oldest to newest, `amended_by` serialized as a username (not a
+  raw ID, unlike `ManualBatchSerializer`'s own `amended_by` field).
+  Deliberately **not** gated on `amend_eligible`/`is_locked` — this is a
+  read of past events, so a locked or permanently-out-of-window batch's
+  history must still be readable. Empty list, not an error, for a batch
+  with no amendments.
 - `POST /api/batches/<id>/finalize/` — freezes synopsis/weather/actions
   (from the request) and the current `SitRepSignatoryConfig` values onto
   the batch, sets it `FINALIZED`. Same call handles both a fresh
@@ -226,10 +250,91 @@ boundary and the date-rollover logic for the overnight window.
 recent first, regardless of whether its window has closed, with an
 **"Amended" badge** on any batch whose `amended_at` is set. A `DRAFT`
 row (or an amended, currently-unlocked `FINALIZED` row) links back into
-the normal entry-editing view via `?batch_id=`; a locked `FINALIZED` row
-links straight to `/api/batches/<id>/download/`. This is deliberate: OPS
-must be able to finish, amend, or re-download a past batch that was
-missed in its own window.
+the normal entry-editing view via `?batch_id=`; every `FINALIZED` row
+gets a "Download PDF" link regardless of lock state. This is deliberate:
+OPS must be able to finish, amend, or re-download a past batch that was
+missed in its own window. A locked `FINALIZED` row's action column also
+shows either an **"Amend" link** (if `amend_eligible`) or a **"Locked —
+outside the last 5 periods"** note (if not) — see "Amendment Restriction
+Window" below; the main entry-editing page's own "Amend This Batch"
+button is gated the identical way, reading the same `amend_eligible`
+field, so the two entry points never disagree.
+
+## Amendment Restriction Window (last 5 periods)
+
+A `FINALIZED` batch isn't amendable forever — only the 5 most recently
+finalized periods are, unless the batch predates this feature entirely
+(grandfathered). This exists to bound how far back OPS can retroactively
+edit an already-released SitRep, while still allowing the append-only
+`BatchAmendment` log (above) to keep every amendment that was ever made,
+without a cap.
+
+**`AMEND_RESTRICTION_CUTOFF`** (`settings.py`) — a fixed, literal
+datetime: `2026-08-27 00:00 Asia/Manila`, the moment this feature
+shipped. **Never move it forward after the fact** — that would silently
+grandfather batches that were already correctly subject to the
+restriction, revoking a limit OPS had already been told applied. A
+batch `finalized_at` before the cutoff is grandfathered — always
+`amend_eligible`, forever, and (important) **does not occupy one of the
+5 window slots** for any other batch. A batch finalized at/after the
+cutoff is subject to the window. This was a deliberate choice over
+backdating the cutoff to make the restriction "real" immediately: it
+means nothing already amendable today loses that capability out from
+under OPS mid-use, at the cost of the window having no visible effect
+until 5 batches have finalized after the cutoff (~2.5 days at this
+office's ~2 batches/day volume).
+
+**`amend_eligible(batch)`** (`views.py`, same pattern/location as
+`_current_batch_slot()`) — the eligibility check: must be `FINALIZED`;
+grandfathered batches are always eligible; otherwise eligible only if
+`batch` is among the 5 most-recently-finalized post-cutoff batches.
+Also exposed as **`ManualBatch.amend_eligible`**, a model property that
+delegates to this function (locally-imported to avoid a circular import,
+same as `is_locked`'s own use of it) — this is what
+`ManualBatchSerializer`, `is_locked`, and both frontend Amend buttons
+(Batch History and the main page) actually read, so there is one
+implementation, not several that could drift.
+
+**Ranked by period identity, not `finalized_at` — this is the
+non-obvious part.** The "5 most recent" are ranked by each batch's own
+`(date, shift)` — via `_period_sort_key()`, an explicit key, not
+`shift`'s alphabetical order (which only coincidentally agrees that
+"AM" sorts before "PM" for the literal strings used today; the real
+reason AM sorts first is that the 0600H period is released before the
+same date's 1800H period) — **never** by the wall-clock moment Finalize
+was actually pressed. A batch can be finalized out of period order (OPS
+catches up on a missed period days later via Batch History), and it
+must still rank by the period it represents, not by when it happened to
+get finalized — otherwise a stale backlog catch-up could either wrongly
+occupy a "recent" window slot or wrongly push out a genuinely-recent
+period. Covered explicitly by a test that scrambles `finalized_at` out
+of period order and confirms the ranking doesn't follow it.
+
+**Fully lazy, same spirit as `_current_batch_slot()` — no scheduled
+job, no explicit "lock" mutation.** The moment a 6th post-cutoff batch
+finalizes and pushes an older one out of the window, that older batch's
+`amend_eligible` (and therefore `is_locked`, if it happened to be
+mid-amendment) simply evaluates differently the next time anything
+reads it. Nothing "notices" the transition or acts on it.
+
+**Deliberately no auto-revert, snapshot, or rollback when a batch falls
+out of the window while unlocked (amended but not yet re-finalized).**
+If that happens, the batch simply **re-locks in whatever state it's
+currently in** — `is_locked` starts returning `True` again automatically
+(it already required `amend_eligible` — see `ManualBatch.is_locked`),
+with no snapshot ever taken of "how it looked before this amendment" and
+no attempt to undo in-progress edits. This was a scope decision, not an
+oversight: reverting live, possibly-partial edits to a shared record
+that another OPS session could be mid-editing has real failure modes
+(what does "revert" mean if two fields were independently changed? what
+if the revert itself races a save?) for a case — OPS actively editing an
+amended batch at the exact moment it happens to cross the 5-period
+boundary — that's rare at this office's volume and has an obvious
+manual fallback (re-amend it, if it's grandfathered or a new period has
+freed a slot; otherwise the edit-in-progress is simply frozen as of
+whatever was last saved, same as any other lock). **If a future session
+is asked to add rollback here, that's a new, deliberate product
+decision requiring its own design — not a bug fix.**
 
 ## PDF Generation (`apps/quickentry/pdf.py`)
 
@@ -249,7 +354,11 @@ regenerate-on-demand. The PDF is rebuilt purely from:
   since statuses don't meaningfully "combine" the way incident lists do).
 - an **amendment note** rendered when `batch.amended_at` is set
   ("This report was amended on … Reason: …") — a permanent marker, not
-  cleared by a later re-finalize.
+  cleared by a later re-finalize. Deliberately still just the **latest**
+  amendment (the cache fields), not the full `BatchAmendment` history —
+  unchanged on purpose when the amendment log/restriction window shipped
+  (see "Amendment Restriction Window"); the full history is an in-app-only
+  view (main entry-editing page, when a batch has ever been amended).
 
 This means the same batch produces a byte-for-byte reproducible PDF no
 matter how many times or how long after finalizing it's downloaded, and
