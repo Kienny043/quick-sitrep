@@ -55,6 +55,13 @@
                 {% if batch.status == "FINALIZED" %}
                   <a href="{% url 'quickentry-batch-download' pk=batch.id %}" class="btn btn-small">Download PDF</a>
                 {% endif %}
+                {% if batch.status == "FINALIZED" and batch.is_locked %}
+                  {% if batch.amend_eligible %}
+                    <a href="{% url 'quickentry-main' %}?batch_id={{ batch.id }}" class="btn btn-small btn-warning">Amend</a>
+                  {% else %}
+                    <span class="history-locked-note" title="This period is outside the 5 most recent SitRep periods and can no longer be amended.">Locked — outside the last 5 periods</span>
+                  {% endif %}
+                {% endif %}
               </td>
             </tr>
           {% empty %}

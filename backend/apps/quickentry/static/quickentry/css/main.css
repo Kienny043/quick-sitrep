@@ -269,6 +269,14 @@ h1, h2, h3, h4 { margin: 0 0 0.4em; font-weight: 700; }
 .history-status--amended { background: rgba(180, 83, 9, 0.12); color: #b45309; margin-left: 0.35rem; }
 .history-action { text-align: right; }
 .history-action .btn + .btn { margin-left: 0.4rem; }
+.history-locked-note {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-style: italic;
+  color: var(--color-pd-text-secondary);
+  margin-left: 0.4rem;
+  cursor: help;
+}
 .history-empty { text-align: center; color: var(--color-pd-text-secondary); padding: 1.5rem !important; }
 
 .layout {

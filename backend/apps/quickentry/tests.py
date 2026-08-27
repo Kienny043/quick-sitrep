@@ -557,3 +557,122 @@ class AmendmentHistoryEndpointTests(TestCase):
         rows = response.json()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["amendment_reason"], "Amended back when it was still within the window")
+
+
+class BatchHistoryAmendButtonTests(TestCase):
+    """
+    Step 6: history.html's action column, gated on amend_eligible (a
+    model property, so no view-code changes were needed to expose it
+    here -- see AmendEligibleFieldExposureTests). No JS-testable seam for
+    this one (the change is template-only; main.js's OWN "Amend This
+    Batch" button is a different, pre-existing button on the main entry-
+    editing page, untouched by this step) -- verified instead by
+    rendering the real /history/ view and checking actual HTML output,
+    one batch per test to keep each assertion unambiguous.
+    """
+
+    CUTOFF = settings.AMEND_RESTRICTION_CUTOFF
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+
+        self.user = get_user_model().objects.create_user(
+            username="history_ui_test_user", password="testpass123!"
+        )
+        self.client.force_login(self.user)
+
+    def _make(self, d, shift, finalized_at=None, status_=ManualBatch.Status.DRAFT, **extra):
+        return ManualBatch.objects.create(
+            date=d, shift=shift, status=status_, finalized_at=finalized_at, **extra
+        )
+
+    def _row_html(self, html, batch_id):
+        # Isolate exactly the <tr>...</tr> containing this batch's own
+        # Download-PDF link (unique per batch id, present on every
+        # FINALIZED row) -- a fixed-width slice bled into the adjacent
+        # row when two rows' Amend/locked-note content sat close
+        # together, so this finds the real row boundaries instead.
+        anchor = f"batches/{batch_id}/download/"
+        idx = html.index(anchor)
+        row_start = html.rindex("<tr>", 0, idx)
+        row_end = html.index("</tr>", idx)
+        return html[row_start:row_end]
+
+    def test_draft_batch_shows_open_but_no_amend_button_and_no_locked_note(self):
+        batch = self._make(date(2026, 1, 1), ManualBatch.Shift.AM)
+        html = self.client.get("/history/").content.decode()
+
+        self.assertIn(f"?batch_id={batch.id}", html)  # the Open link
+        self.assertIn(">Open<", html)
+        self.assertNotIn(">Amend<", html)
+        self.assertNotIn("Locked", html)
+
+    def test_finalized_locked_ineligible_batch_shows_locked_note_not_amend_button(self):
+        periods = list(_sequential_periods(self.CUTOFF.date(), 6))
+        for i, (d, shift) in enumerate(periods):
+            self._make(
+                d, shift, self.CUTOFF + timedelta(hours=i),
+                status_=ManualBatch.Status.FINALIZED,
+            )
+        oldest = ManualBatch.objects.get(date=periods[0][0], shift=periods[0][1])
+        newest = ManualBatch.objects.get(date=periods[-1][0], shift=periods[-1][1])
+        self.assertFalse(oldest.amend_eligible, "sanity check")
+        self.assertTrue(newest.amend_eligible, "sanity check")
+
+        html = self.client.get("/history/").content.decode()
+        oldest_row = self._row_html(html, oldest.id)
+        self.assertIn("Locked", oldest_row)
+        self.assertIn("outside the last 5 periods", oldest_row)
+        self.assertNotIn(">Amend<", oldest_row)
+        # Download PDF's own visibility must be completely unaffected,
+        # for this row specifically, not just somewhere on the page.
+        self.assertIn("Download PDF", oldest_row)
+
+        # And the contrast case, in the same render: a batch that IS
+        # still within the window shows Amend, not the locked note.
+        newest_row = self._row_html(html, newest.id)
+        self.assertIn(">Amend<", newest_row)
+        self.assertNotIn("Locked", newest_row)
+
+    def test_finalized_locked_eligible_post_cutoff_batch_shows_amend_button_not_locked_note(self):
+        batch = self._make(
+            self.CUTOFF.date(), ManualBatch.Shift.AM, self.CUTOFF + timedelta(hours=1),
+            status_=ManualBatch.Status.FINALIZED,
+        )
+        self.assertTrue(batch.amend_eligible, "sanity check")
+
+        html = self.client.get("/history/").content.decode()
+        self.assertIn(">Amend<", html)
+        self.assertNotIn("Locked", html)
+        self.assertIn("Download PDF", html)
+
+    def test_finalized_locked_grandfathered_pre_cutoff_batch_always_shows_amend(self):
+        batch = self._make(
+            self.CUTOFF.date() - timedelta(days=30), ManualBatch.Shift.AM,
+            self.CUTOFF - timedelta(days=30),
+            status_=ManualBatch.Status.FINALIZED,
+        )
+        self.assertTrue(batch.amend_eligible, "grandfathered batches are always eligible")
+
+        html = self.client.get("/history/").content.decode()
+        self.assertIn(">Amend<", html)
+        self.assertNotIn("Locked", html)
+
+    def test_finalized_but_currently_unlocked_batch_shows_open_not_a_redundant_amend_button(self):
+        # Mid-amendment (amended more recently than last finalized) --
+        # is_locked is False, so "Open" already provides full access;
+        # this step doesn't add a second, redundant Amend link here.
+        batch = self._make(
+            self.CUTOFF.date(), ManualBatch.Shift.PM, self.CUTOFF + timedelta(hours=1),
+            status_=ManualBatch.Status.FINALIZED,
+        )
+        batch.amended_at = self.CUTOFF + timedelta(hours=2)
+        batch.amended_by = self.user
+        batch.amendment_reason = "Mid-amendment"
+        batch.save()
+        self.assertFalse(batch.is_locked, "sanity check")
+
+        html = self.client.get("/history/").content.decode()
+        self.assertIn(">Open<", html)
+        self.assertNotIn(">Amend<", html)
+        self.assertNotIn("Locked", html)
