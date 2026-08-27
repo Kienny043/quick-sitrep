@@ -14,7 +14,7 @@ from apps.quickentry.ai import (
     _normalize_decorative_unicode,
     _post_with_retry,
 )
-from apps.quickentry.models import ManualBatch
+from apps.quickentry.models import BatchAmendment, ManualBatch
 from apps.quickentry.views import _current_batch_slot, _period_sort_key, amend_eligible
 
 MANILA = ZoneInfo("Asia/Manila")
@@ -316,3 +316,101 @@ class AmendEligibleTests(TestCase):
             self.assertTrue(amend_eligible(b), f"{b} is among the 5 most recent periods")
 
 
+
+
+class AmendEndpointTests(TestCase):
+    """
+    POST /api/batches/<id>/amend/ -- the actual wiring (Step 3): the
+    eligibility check gating the endpoint, the BatchAmendment row written
+    alongside the existing cache-field update, and is_locked picking up
+    eligibility automatically once a batch falls out of the window.
+    """
+
+    CUTOFF = settings.AMEND_RESTRICTION_CUTOFF
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+
+        self.user = get_user_model().objects.create_user(
+            username="amend_test_user", password="testpass123!"
+        )
+        self.client.force_login(self.user)
+
+    def _make(self, d, shift, finalized_at, status_=ManualBatch.Status.FINALIZED):
+        return ManualBatch.objects.create(
+            date=d, shift=shift, status=status_, finalized_at=finalized_at,
+        )
+
+    def _amend(self, batch_id, reason="Test amendment"):
+        return self.client.post(
+            f"/api/batches/{batch_id}/amend/",
+            data=json.dumps({"reason": reason}),
+            content_type="application/json",
+        )
+
+    def test_amending_an_eligible_batch_creates_exactly_one_log_row_matching_the_cache_field(self):
+        batch = self._make(self.CUTOFF.date(), ManualBatch.Shift.AM, self.CUTOFF + timedelta(hours=1))
+
+        response = self._amend(batch.id, reason="Correcting a typo in the synopsis")
+        self.assertEqual(response.status_code, 200, response.content)
+
+        batch.refresh_from_db()
+        rows = list(BatchAmendment.objects.filter(batch=batch))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].amended_at, batch.amended_at)
+        self.assertEqual(rows[0].amended_by_id, batch.amended_by_id)
+        self.assertEqual(rows[0].amendment_reason, "Correcting a typo in the synopsis")
+        self.assertEqual(batch.amendment_reason, "Correcting a typo in the synopsis")
+
+    def test_amending_an_ineligible_out_of_window_batch_is_rejected_with_403_and_no_log_row(self):
+        periods = list(_sequential_periods(self.CUTOFF.date(), 6))
+        batches = [
+            self._make(d, shift, self.CUTOFF + timedelta(hours=i))
+            for i, (d, shift) in enumerate(periods)
+        ]
+        oldest = batches[0]  # pushed out by the other 5
+
+        response = self._amend(oldest.id, reason="Trying to amend something too old")
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("5 most recent SitRep periods", response.json().get("detail", ""))
+        self.assertEqual(BatchAmendment.objects.filter(batch=oldest).count(), 0)
+
+        oldest.refresh_from_db()
+        self.assertIsNone(oldest.amended_at, "the cache field must not be touched by a rejected amend")
+
+    def test_amended_batch_relocks_automatically_when_pushed_out_of_the_window_later(self):
+        target = self._make(self.CUTOFF.date(), ManualBatch.Shift.AM, self.CUTOFF + timedelta(hours=1))
+
+        response = self._amend(target.id, reason="Adding a missed incident")
+        self.assertEqual(response.status_code, 200, response.content)
+        target.refresh_from_db()
+        self.assertFalse(target.is_locked, "amending an eligible batch must unlock it")
+
+        # Finalize 5 more post-cutoff periods, all strictly AFTER target's
+        # own period -- this pushes target out of the 5-slot window
+        # without anyone touching target itself in any way.
+        later_periods = list(_sequential_periods(self.CUTOFF.date() + timedelta(days=1), 5))
+        for i, (d, shift) in enumerate(later_periods):
+            self._make(d, shift, self.CUTOFF + timedelta(hours=2 + i))
+
+        target.refresh_from_db()  # no write happened to target -- same row as before
+        self.assertFalse(amend_eligible(target), "target should now be outside the 5-period window")
+        self.assertTrue(target.is_locked, "falling out of the window must re-lock it automatically")
+
+    def test_amending_twice_creates_two_separate_log_rows_in_order(self):
+        batch = self._make(self.CUTOFF.date(), ManualBatch.Shift.AM, self.CUTOFF + timedelta(hours=1))
+
+        r1 = self._amend(batch.id, reason="First correction")
+        self.assertEqual(r1.status_code, 200, r1.content)
+        r2 = self._amend(batch.id, reason="Second correction, found something else")
+        self.assertEqual(r2.status_code, 200, r2.content)
+
+        rows = list(BatchAmendment.objects.filter(batch=batch))  # model Meta orders oldest -> newest
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0].amendment_reason, "First correction")
+        self.assertEqual(rows[1].amendment_reason, "Second correction, found something else")
+        self.assertLess(rows[0].amended_at, rows[1].amended_at)
+
+        batch.refresh_from_db()
+        self.assertEqual(batch.amendment_reason, "Second correction, found something else")
+        self.assertEqual(batch.amended_at, rows[1].amended_at)

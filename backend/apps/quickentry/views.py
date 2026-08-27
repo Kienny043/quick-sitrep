@@ -30,6 +30,7 @@ from .ai import (
 from .models import (
     MUNICIPALITY_CHOICES,
     ManualBatch,
+    BatchAmendment,
     ManualEntry,
     LifelinesStatus,
     SitRepSignatoryConfig,
@@ -581,12 +582,21 @@ def amend_eligible(batch):
 def amend_batch(request, pk):
     """
     Records an amendment and — via ManualBatch.is_locked comparing
-    amended_at against finalized_at — reopens entries/finalize-panel
-    fields for editing, without ever moving status away from FINALIZED.
-    Only the latest amendment is tracked (amended_at/amendment_reason are
-    overwritten, not appended); re-amending an already-open batch just
-    updates the reason. finalize_batch (below) re-locks it the normal
-    way once OPS is done editing and re-finalizes.
+    amended_at against finalized_at (and, now, amend_eligible() — see
+    that function and models.ManualBatch.is_locked) — reopens entries/
+    finalize-panel fields for editing, without ever moving status away
+    from FINALIZED. finalize_batch (below) re-locks it the normal way
+    once OPS is done editing and re-finalizes.
+
+    ManualBatch.amended_at/amended_by/amendment_reason remain a
+    denormalized "latest amendment" cache (overwritten every time, same
+    as before) — PDF generation and is_locked's timestamp comparison
+    both still read these directly. BatchAmendment is the append-only
+    log alongside it: every successful amend now ALSO creates one row
+    there, from this same `now` value, so the cache and the log can
+    never drift apart. Only the eligibility check below can reject an
+    amend; re-amending an already-open (still-eligible) batch is
+    unaffected and just updates the reason, same as before.
     """
     batch = get_object_or_404(ManualBatch, pk=pk)
     if batch.status != ManualBatch.Status.FINALIZED:
@@ -594,14 +604,32 @@ def amend_batch(request, pk):
             {"detail": "Only a finalized batch can be amended."},
             status=status.HTTP_400_BAD_REQUEST,
         )
+    if not amend_eligible(batch):
+        return Response(
+            {
+                "detail": (
+                    "This period is outside the 5 most recent SitRep "
+                    "periods and can no longer be amended."
+                )
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
 
     body = AmendBatchRequestSerializer(data=request.data)
     body.is_valid(raise_exception=True)
 
-    batch.amended_at = timezone.now()
+    now = timezone.now()
+    batch.amended_at = now
     batch.amended_by = request.user
     batch.amendment_reason = body.validated_data["reason"]
     batch.save()
+
+    BatchAmendment.objects.create(
+        batch=batch,
+        amended_by=request.user,
+        amended_at=now,
+        amendment_reason=body.validated_data["reason"],
+    )
 
     return Response(ManualBatchSerializer(batch).data)
 
