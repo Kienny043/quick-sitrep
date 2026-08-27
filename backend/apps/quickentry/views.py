@@ -38,6 +38,7 @@ from .models import (
 from .pdf import generate_batch_pdf, compute_summary
 from .serializers import (
     ManualBatchSerializer,
+    BatchAmendmentSerializer,
     ManualEntrySummarySerializer,
     ExtractRequestSerializer,
     EntrySaveRequestSerializer,
@@ -632,6 +633,25 @@ def amend_batch(request, pk):
     )
 
     return Response(ManualBatchSerializer(batch).data)
+
+
+# ── GET /api/batches/<id>/amendments/ ───────────────────────────────────
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def batch_amendments(request, pk):
+    """
+    Full amendment history for a batch, oldest to newest (BatchAmendment.
+    Meta.ordering) — a read of past events, not a check on current
+    editability, so this deliberately does NOT gate on amend_eligible()/
+    is_locked the way amend_batch does. A locked, out-of-window, or even
+    grandfathered-forever batch's history must stay readable regardless
+    of whether it could be amended again right now. Empty list (not a
+    404/error) for a batch with no amendments yet — same "empty is a
+    normal result" spirit as the AI extraction schema's arrays.
+    """
+    batch = get_object_or_404(ManualBatch, pk=pk)
+    amendments = batch.amendment_log.all()
+    return Response(BatchAmendmentSerializer(amendments, many=True).data)
 
 
 # ── POST /api/batches/<id>/finalize/ ───────────────────────────────────

@@ -13,6 +13,7 @@ from rest_framework import serializers
 from .models import (
     MUNICIPALITY_CHOICES,
     ManualBatch,
+    BatchAmendment,
     ManualEntry,
     RoadCrash,
     RoadCrashVictim,
@@ -79,6 +80,28 @@ class ManualBatchSerializer(serializers.ModelSerializer):
             "synopsis", "weather_conditions", "actions_taken",
         ]
         read_only_fields = fields
+
+
+class BatchAmendmentSerializer(serializers.ModelSerializer):
+    """
+    One row of a batch's amendment history (GET /api/batches/<id>/
+    amendments/) — a read of past events, distinct from
+    ManualBatchSerializer's amended_by (which DRF defaults to a raw
+    user ID for an FK). amended_by is username here specifically because
+    this is what actually renders in the UI's history list; None for a
+    since-deleted user (amended_by is SET_NULL on the model) rather than
+    erroring.
+    """
+
+    amended_by = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BatchAmendment
+        fields = ["id", "amended_by", "amended_at", "amendment_reason"]
+        read_only_fields = fields
+
+    def get_amended_by(self, obj):
+        return obj.amended_by.username if obj.amended_by else None
 
 
 class ManualEntrySummarySerializer(serializers.ModelSerializer):

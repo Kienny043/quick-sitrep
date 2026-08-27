@@ -19,6 +19,11 @@ urlpatterns = [
         name="quickentry-batch-generate-weather",
     ),
     path("batches/<int:pk>/amend/", views.amend_batch, name="quickentry-batch-amend"),
+    path(
+        "batches/<int:pk>/amendments/",
+        views.batch_amendments,
+        name="quickentry-batch-amendments",
+    ),
     path("batches/<int:pk>/finalize/", views.finalize_batch, name="quickentry-batch-finalize"),
     path("batches/<int:pk>/download/", views.download_batch, name="quickentry-batch-download"),
 ]

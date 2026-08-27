@@ -483,3 +483,77 @@ class AmendEligibleFieldExposureTests(TestCase):
         response = self.client.get(f"/api/current-batch/?batch_id={draft.id}")
         self.assertEqual(response.status_code, 200)
         self.assertIs(response.json()["batch"]["amend_eligible"], False)
+
+
+class AmendmentHistoryEndpointTests(TestCase):
+    """
+    GET /api/batches/<id>/amendments/ -- a read of past events, so
+    deliberately independent of amend_eligible()/is_locked (see the
+    view's own docstring).
+    """
+
+    CUTOFF = settings.AMEND_RESTRICTION_CUTOFF
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        self.user = User.objects.create_user(username="history_test_user", password="testpass123!")
+        self.other_user = User.objects.create_user(username="second_ops_officer", password="testpass123!")
+        self.client.force_login(self.user)
+
+    def _make_batch(self, d, shift, finalized_at, status_=ManualBatch.Status.FINALIZED):
+        return ManualBatch.objects.create(date=d, shift=shift, status=status_, finalized_at=finalized_at)
+
+    def test_multiple_amendments_return_oldest_to_newest_with_correct_data(self):
+        batch = self._make_batch(self.CUTOFF.date(), ManualBatch.Shift.AM, self.CUTOFF + timedelta(hours=1))
+        BatchAmendment.objects.create(
+            batch=batch, amended_by=self.user,
+            amended_at=self.CUTOFF + timedelta(hours=2),
+            amendment_reason="First correction",
+        )
+        BatchAmendment.objects.create(
+            batch=batch, amended_by=self.other_user,
+            amended_at=self.CUTOFF + timedelta(hours=5),
+            amendment_reason="Second correction by a different officer",
+        )
+
+        response = self.client.get(f"/api/batches/{batch.id}/amendments/")
+        self.assertEqual(response.status_code, 200)
+        rows = response.json()
+        self.assertEqual(len(rows), 2)
+
+        self.assertEqual(rows[0]["amended_by"], "history_test_user")
+        self.assertEqual(rows[0]["amendment_reason"], "First correction")
+        self.assertEqual(rows[1]["amended_by"], "second_ops_officer")
+        self.assertEqual(rows[1]["amendment_reason"], "Second correction by a different officer")
+        self.assertLess(rows[0]["amended_at"], rows[1]["amended_at"])
+
+    def test_batch_with_zero_amendments_returns_empty_list_not_error(self):
+        batch = self._make_batch(self.CUTOFF.date(), ManualBatch.Shift.PM, self.CUTOFF + timedelta(hours=1))
+        response = self.client.get(f"/api/batches/{batch.id}/amendments/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), [])
+
+    def test_history_readable_for_a_batch_currently_outside_the_amend_window(self):
+        # Push a batch out of the 5-period window, same setup as
+        # AmendEligibleFieldExposureTests' ineligible case.
+        periods = list(_sequential_periods(self.CUTOFF.date(), 6))
+        batches = [
+            self._make_batch(d, shift, self.CUTOFF + timedelta(hours=i))
+            for i, (d, shift) in enumerate(periods)
+        ]
+        locked_out_batch = batches[0]
+        self.assertFalse(locked_out_batch.amend_eligible, "sanity check: batch must actually be ineligible now")
+
+        BatchAmendment.objects.create(
+            batch=locked_out_batch, amended_by=self.user,
+            amended_at=self.CUTOFF + timedelta(hours=0, minutes=30),
+            amendment_reason="Amended back when it was still within the window",
+        )
+
+        response = self.client.get(f"/api/batches/{locked_out_batch.id}/amendments/")
+        self.assertEqual(response.status_code, 200)
+        rows = response.json()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["amendment_reason"], "Amended back when it was still within the window")
