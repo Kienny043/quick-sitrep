@@ -36,6 +36,8 @@ ALLOWED_HOSTS = [
     h.strip() for h in os.getenv("DJANGO_ALLOWED_HOSTS", "").split(",") if h.strip()
 ]
 
+CSRF_TRUSTED_ORIGINS = []
+
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
@@ -132,6 +134,34 @@ MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# --------------------------------------------------------------------------
+# Production hardening (mirrors inventory-system's proven pattern for the
+# same Render deploy shape — see that project's config/settings.py)
+# --------------------------------------------------------------------------
+# All DEBUG-gated so local dev (SQLite, HTTP) is unaffected.
+
+if not DEBUG:
+    # Render terminates TLS at its edge and forwards over HTTP with this
+    # header, so Django can tell the original request was HTTPS. Render's
+    # edge already forces HTTP->HTTPS for *.onrender.com, so an in-app
+    # SECURE_SSL_REDIRECT is redundant here (and risks a health-check
+    # redirect loop) — the proxy header + secure cookies are the useful part.
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+
+# Render injects the service's own hostname at runtime. Fold it into
+# ALLOWED_HOSTS + CSRF_TRUSTED_ORIGINS so the *.onrender.com subdomain need
+# not be hardcoded before the service exists. The session-auth + CSRF
+# template UI (Step 5) needs its origin trusted for the login POST.
+_RENDER_HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
+if _RENDER_HOST:
+    if _RENDER_HOST not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(_RENDER_HOST)
+    _render_origin = f"https://{_RENDER_HOST}"
+    if _render_origin not in CSRF_TRUSTED_ORIGINS:
+        CSRF_TRUSTED_ORIGINS.append(_render_origin)
 
 LOGIN_URL = "/accounts/login/"
 LOGIN_REDIRECT_URL = "/"
